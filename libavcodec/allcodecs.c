@@ -485,6 +485,7 @@ extern AVCodec ff_vorbis_encoder;
 extern AVCodec ff_vorbis_decoder;
 extern AVCodec ff_wavpack_encoder;
 extern AVCodec ff_wavpack_decoder;
+extern AVCodec ff_wavpack_dsd_decoder;
 extern AVCodec ff_wmalossless_decoder;
 extern AVCodec ff_wmapro_decoder;
 extern AVCodec ff_wmav1_encoder;

@@ -98,10 +98,10 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
         return ret;
     }
 
-    if (wc->header.flags & WV_DSD) {
-        avpriv_report_missing_feature(ctx, "WV DSD");
-        return AVERROR_PATCHWELCOME;
-    }
+    // if (wc->header.flags & WV_DSD) {
+    //     avpriv_report_missing_feature(ctx, "WV DSD");
+    //     return AVERROR_PATCHWELCOME;
+    // }
 
     if (wc->header.version < 0x402 || wc->header.version > 0x410) {
         avpriv_report_missing_feature(ctx, "WV version 0x%03X",
@@ -230,6 +230,7 @@ static int wv_read_header(AVFormatContext *s)
     AVStream *st;
     int ret;
 
+    av_log(s, AV_LOG_WARNING, "wv_read_header() called\n");
     wc->block_parsed = 0;
     for (;;) {
         if ((ret = wv_read_block_header(s, pb)) < 0)
@@ -245,7 +246,9 @@ static int wv_read_header(AVFormatContext *s)
     if (!st)
         return AVERROR(ENOMEM);
     st->codecpar->codec_type            = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->codec_id              = AV_CODEC_ID_WAVPACK;
+    st->codecpar->codec_id              = wc->header.flags & WV_DSD ?
+                                          AV_CODEC_ID_WAVPACK :
+                                          AV_CODEC_ID_WAVPACK_DSD;
     st->codecpar->channels              = wc->chan;
     st->codecpar->channel_layout        = wc->chmask;
     st->codecpar->sample_rate           = wc->rate;
@@ -273,6 +276,8 @@ static int wv_read_packet(AVFormatContext *s, AVPacket *pkt)
     int off;
     int64_t pos;
     uint32_t block_samples;
+
+    av_log(s, AV_LOG_WARNING, "wv_read_packet() called\n");
 
     if (avio_feof(s->pb))
         return AVERROR_EOF;
