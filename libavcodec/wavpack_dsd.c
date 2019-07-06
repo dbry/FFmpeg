@@ -68,6 +68,7 @@ typedef struct WavpackFrameContext {
     WvChannel ch[2];
     int pos;
     SavedContext sc, extra_sc;
+    int dsd_mode;
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -386,6 +387,36 @@ static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc,
     return 0;
 }
 
+// Return a random value in the range: 0.0 <= n < 1.0
+
+static double frandom (void)
+{
+    static uint64_t random = 0x3141592653589793;
+    random = ((random << 4) - random) ^ 1;
+    random = ((random << 4) - random) ^ 1;
+    random = ((random << 4) - random) ^ 1;
+    return (random >> 32) / 4294967296.0;
+}
+
+static inline int wv_unpack_stereo_dsd(WavpackFrameContext *s, GetBitContext *gb,
+                                       void *dst_l, void *dst_r, const int type)
+{
+    int count = 0;
+    float *dstfl_l          = dst_l;
+    float *dstfl_r          = dst_r;
+
+    av_log(s->avctx, AV_LOG_WARNING, "wv_unpack_stereo_dsd() called, type = %d, samples = %d\n", type, s->samples);
+
+    do {
+        *dstfl_l++ = (frandom() * 0.1) - 0.05;
+        *dstfl_r++ = (frandom() * 0.1) - 0.05;
+        count++;
+    } while (count < s->samples);
+
+    wv_reset_saved_context(s);
+    return 0;
+}
+
 static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
                                    void *dst_l, void *dst_r, const int type)
 {
@@ -650,8 +681,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     int ret;
     int got_terms   = 0, got_weights = 0, got_samples = 0,
         got_entropy = 0, got_bs      = 0, got_float   = 0, got_hybrid = 0;
+    int got_dsd = 0;
     int i, j, id, size, ssize, weights, t;
-    int bpp, chan = 0, chmask = 0, orig_bpp, sample_rate = 0;
+    int bpp, chan = 0, chmask = 0, orig_bpp, sample_rate = 0, rate_x = 1;
     int multiblock;
 
     if (block_no >= wc->fdec_num && wv_alloc_frame_context(wc) < 0) {
@@ -909,6 +941,25 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, size);
             got_bs       = 1;
             break;
+        case WP_ID_DSD_DATA:
+            if (size < 2) {
+                av_log(avctx, AV_LOG_ERROR, "Invalid DSD_DATA, size = %i\n",
+                       size);
+                bytestream2_skip(&gb, ssize);
+                continue;
+            }
+            rate_x = 1 << bytestream2_get_byte(&gb);
+            s->dsd_mode = bytestream2_get_byte(&gb);
+            av_log(avctx, AV_LOG_WARNING, "got a DSD block, size = %i, mode = %d\n", size, s->dsd_mode);
+
+            s->sc.offset = bytestream2_tell(&gb);
+            s->sc.size   = size * 8;
+            if ((ret = init_get_bits8(&s->gb, gb.buffer, size)) < 0)
+                return ret;
+            s->data_size = size * 8;
+            bytestream2_skip(&gb, size-2);
+            got_dsd      = 1;
+            break;
         case WP_ID_EXTRABITS:
             if (size <= 4) {
                 av_log(avctx, AV_LOG_ERROR, "Invalid EXTRABITS, size = %i\n",
@@ -983,41 +1034,44 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, 1);
     }
 
-    if (!got_terms) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation terms\n");
-        return AVERROR_INVALIDDATA;
+    if (got_bs) {
+        if (!got_terms) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation terms\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_weights) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation weights\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_samples) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation samples\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_entropy) {
+            av_log(avctx, AV_LOG_ERROR, "No block with entropy info\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (s->hybrid && !got_hybrid) {
+            av_log(avctx, AV_LOG_ERROR, "Hybrid config not found\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_float && avctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
+            av_log(avctx, AV_LOG_ERROR, "Float information not found\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (s->got_extra_bits && avctx->sample_fmt != AV_SAMPLE_FMT_FLTP) {
+            const int size   = get_bits_left(&s->gb_extra_bits);
+            const int wanted = s->samples * s->extra_bits << s->stereo_in;
+            if (size < wanted) {
+                av_log(avctx, AV_LOG_ERROR, "Too small EXTRABITS\n");
+                s->got_extra_bits = 0;
+            }
+        }
     }
-    if (!got_weights) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation weights\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_samples) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation samples\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_entropy) {
-        av_log(avctx, AV_LOG_ERROR, "No block with entropy info\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (s->hybrid && !got_hybrid) {
-        av_log(avctx, AV_LOG_ERROR, "Hybrid config not found\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_bs) {
+
+    if (!got_bs && !got_dsd) {
         av_log(avctx, AV_LOG_ERROR, "Packed samples not found\n");
         return AVERROR_INVALIDDATA;
-    }
-    if (!got_float && avctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
-        av_log(avctx, AV_LOG_ERROR, "Float information not found\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (s->got_extra_bits && avctx->sample_fmt != AV_SAMPLE_FMT_FLTP) {
-        const int size   = get_bits_left(&s->gb_extra_bits);
-        const int wanted = s->samples * s->extra_bits << s->stereo_in;
-        if (size < wanted) {
-            av_log(avctx, AV_LOG_ERROR, "Too small EXTRABITS\n");
-            s->got_extra_bits = 0;
-        }
     }
 
     if (!wc->ch_offset) {
@@ -1027,9 +1081,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 av_log(avctx, AV_LOG_ERROR, "Custom sample rate missing.\n");
                 return AVERROR_INVALIDDATA;
             }
-            avctx->sample_rate = sample_rate;
+            avctx->sample_rate = sample_rate * rate_x;
         } else
-            avctx->sample_rate = wv_rates[sr];
+            avctx->sample_rate = wv_rates[sr] * rate_x;
 
         if (multiblock) {
             if (chan)
@@ -1061,7 +1115,11 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     wc->ch_offset += 1 + s->stereo;
 
     if (s->stereo_in) {
-        ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+        if (got_dsd)
+            ret = wv_unpack_stereo_dsd(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+        else
+            ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+
         if (ret < 0)
             return ret;
     } else {
@@ -1109,7 +1167,7 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
     }
 
-    if (frame_flags & 0x80) {
+    if (frame_flags & (WV_FLOAT_DATA | WV_DSD_DATA)) {
         avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
     } else if ((frame_flags & 0x03) <= 1) {
         avctx->sample_fmt = AV_SAMPLE_FMT_S16P;

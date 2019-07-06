@@ -79,7 +79,7 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
 {
     WVContext *wc = ctx->priv_data;
     int ret;
-    int rate, bpp, chan;
+    int rate, rate_x, bpp, chan;
     uint32_t chmask, flags;
 
     wc->pos = avio_tell(pb);
@@ -98,11 +98,6 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
         return ret;
     }
 
-    // if (wc->header.flags & WV_DSD) {
-    //     avpriv_report_missing_feature(ctx, "WV DSD");
-    //     return AVERROR_PATCHWELCOME;
-    // }
-
     if (wc->header.version < 0x402 || wc->header.version > 0x410) {
         avpriv_report_missing_feature(ctx, "WV version 0x%03X",
                                       wc->header.version);
@@ -115,7 +110,8 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
         return 0;
     // parse flags
     flags  = wc->header.flags;
-    bpp    = ((flags & 3) + 1) << 3;
+    rate_x = (flags & WV_DSD) ? 4 : 1;
+    bpp    = (flags & WV_DSD) ? 0 : ((flags & 3) + 1) << 3;
     chan   = 1 + !(flags & WV_MONO);
     chmask = flags & WV_MONO ? AV_CH_LAYOUT_MONO : AV_CH_LAYOUT_STEREO;
     rate   = wv_rates[(flags >> 23) & 0xF];
@@ -200,7 +196,7 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
     if (!wc->chmask)
         wc->chmask = chmask;
     if (!wc->rate)
-        wc->rate   = rate;
+        wc->rate   = rate * rate_x;
 
     if (flags && bpp != wc->bpp) {
         av_log(ctx, AV_LOG_ERROR,
@@ -214,10 +210,10 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
                chan, wc->chan);
         return AVERROR_INVALIDDATA;
     }
-    if (flags && rate != -1 && rate != wc->rate) {
+    if (flags && rate != -1 && rate * rate_x != wc->rate) {
         av_log(ctx, AV_LOG_ERROR,
                "Sampling rate differ, this block: %i, header block: %i\n",
-               rate, wc->rate);
+               rate * rate_x, wc->rate);
         return AVERROR_INVALIDDATA;
     }
     return 0;
@@ -247,7 +243,7 @@ static int wv_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     st->codecpar->codec_type            = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id              = wc->header.flags & WV_DSD ?
-                                          AV_CODEC_ID_WAVPACK :
+                                          AV_CODEC_ID_WAVPACK_DSD :
                                           AV_CODEC_ID_WAVPACK_DSD;
     st->codecpar->channels              = wc->chan;
     st->codecpar->channel_layout        = wc->chmask;
