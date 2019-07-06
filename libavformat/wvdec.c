@@ -120,7 +120,7 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
         chan   = wc->chan;
         chmask = wc->chmask;
     }
-    if ((rate == -1 || !chan) && !wc->block_parsed) {
+    if ((rate == -1 || !chan || flags & WV_DSD) && !wc->block_parsed) {
         int64_t block_end = avio_tell(pb) + wc->header.blocksize;
         if (!(pb->seekable & AVIO_SEEKABLE_NORMAL)) {
             av_log(ctx, AV_LOG_ERROR,
@@ -173,6 +173,17 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
                     return AVERROR_INVALIDDATA;
                 }
                 break;
+            case 0xE:
+                if (size <= 1) {
+                    av_log(ctx, AV_LOG_ERROR,
+                           "Invalid DSD block\n");
+                    return AVERROR_INVALIDDATA;
+                }
+                rate_x = 1 << avio_r8(pb);
+                if (size)
+                    avio_skip(pb, size-1);
+                av_log(ctx, AV_LOG_WARNING, "got a DSD rate_x of %d\n", rate_x);
+                break;
             case 0x27:
                 rate = avio_rl24(pb);
                 break;
@@ -210,7 +221,7 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
                chan, wc->chan);
         return AVERROR_INVALIDDATA;
     }
-    if (flags && rate != -1 && rate * rate_x != wc->rate) {
+    if (flags && rate != -1 && !(flags & WV_DSD) && rate * rate_x != wc->rate) {
         av_log(ctx, AV_LOG_ERROR,
                "Sampling rate differ, this block: %i, header block: %i\n",
                rate * rate_x, wc->rate);

@@ -417,6 +417,23 @@ static inline int wv_unpack_stereo_dsd(WavpackFrameContext *s, GetBitContext *gb
     return 0;
 }
 
+static inline int wv_unpack_mono_dsd(WavpackFrameContext *s, GetBitContext *gb,
+                                       void *dst, const int type)
+{
+    int count = 0;
+    float *dstfl          = dst;
+
+    av_log(s->avctx, AV_LOG_WARNING, "wv_unpack_mono_dsd() called, type = %d, samples = %d\n", type, s->samples);
+
+    do {
+        *dstfl++ = (frandom() * 0.1) - 0.05;
+        count++;
+    } while (count < s->samples);
+
+    wv_reset_saved_context(s);
+    return 0;
+}
+
 static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
                                    void *dst_l, void *dst_r, const int type)
 {
@@ -1123,7 +1140,11 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         if (ret < 0)
             return ret;
     } else {
-        ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
+        if (got_dsd)
+            ret = wv_unpack_mono_dsd(s, &s->gb, samples_l, avctx->sample_fmt);
+        else
+            ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
+
         if (ret < 0)
             return ret;
 
