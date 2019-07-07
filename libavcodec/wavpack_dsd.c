@@ -68,7 +68,8 @@ typedef struct WavpackFrameContext {
     WvChannel ch[2];
     int pos;
     SavedContext sc, extra_sc;
-    int dsd_mode;
+    int dsd_mode, dsd_bytes;
+    const uint8_t *dsd_data;
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -397,6 +398,188 @@ static double frandom (void)
     random = ((random << 4) - random) ^ 1;
     return (random >> 32) / 4294967296.0;
 }
+
+/*---------------- DSD HIGH ---------------*/
+
+typedef struct {
+    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
+} DSDfilters;
+
+#define DSD_BYTE_READY(low,high) (!(((low) ^ (high)) & 0xff000000))
+
+#define PTABLE_BITS 8
+#define PTABLE_BINS (1<<PTABLE_BITS)
+#define PTABLE_MASK (PTABLE_BINS-1)
+
+#define UP   0x010000fe
+#define DOWN 0x00010000
+#define DECAY 8
+
+#define PRECISION 20
+#define VALUE_ONE (1 << PRECISION)
+#define PRECISION_USE 12
+
+#define RATE_S 20
+
+static void init_ptable (int *table, int rate_i, int rate_s)
+{
+    int value = 0x808000, rate = rate_i << 8, c, i;
+
+    for (c = (rate + 128) >> 8; c--;)
+        value += (DOWN - value) >> DECAY;
+
+    for (i = 0; i < PTABLE_BINS/2; ++i) {
+        table [i] = value;
+        table [PTABLE_BINS-1-i] = 0x100ffff - value;
+
+        if (value > 0x010000) {
+            rate += (rate * rate_s + 128) >> 8;
+
+            for (c = (rate + 64) >> 7; c--;)
+                value += (DOWN - value) >> DECAY;
+        }
+    }
+}
+
+static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    int32_t *dst32_l          = dst_l;
+    int32_t *dst32_r          = dst_r;
+    const uint8_t *byteptr = s->dsd_data;
+    const uint8_t *endptr = byteptr + s->dsd_bytes;
+    int channel, rate_i, rate_s, i;
+    uint32_t low, high, value;
+    uint32_t crc = 0xFFFFFFFF;
+    DSDfilters filters [2], *sp = filters;
+    int32_t *ptable;
+    int total_samples = s->samples, stereo = (!dst_r) ? 0 : 1;
+
+    if (endptr - byteptr < (!dst_r ? 13 : 20))
+        return AVERROR_INVALIDDATA;
+
+    rate_i = *byteptr++;
+    rate_s = *byteptr++;
+
+    if (rate_s != RATE_S)
+        return AVERROR_INVALIDDATA;
+
+    ptable = (int32_t *)malloc (PTABLE_BINS * sizeof (*ptable));
+    init_ptable (ptable, rate_i, rate_s);
+
+    for (channel = 0; channel < (!dst_r ? 1 : 2); ++channel) {
+        DSDfilters *sp = filters + channel;
+
+        sp->filter1 = *byteptr++ << (PRECISION - 8);
+        sp->filter2 = *byteptr++ << (PRECISION - 8);
+        sp->filter3 = *byteptr++ << (PRECISION - 8);
+        sp->filter4 = *byteptr++ << (PRECISION - 8);
+        sp->filter5 = *byteptr++ << (PRECISION - 8);
+        sp->filter6 = 0;
+        sp->factor = *byteptr++ & 0xff;
+        sp->factor |= (*byteptr++ << 8) & 0xff00;
+        sp->factor = (sp->factor << 16) >> 16;
+    }
+
+    high = 0xffffffff;
+    low = 0x0;
+
+    for (i = 4; i--;)
+        value = (value << 8) | *byteptr++;
+
+    while (total_samples--) {
+        int bitcount = 8;
+
+        sp [0].value = sp [0].filter1 - sp [0].filter5 + ((sp [0].filter6 * sp [0].factor) >> 2);
+
+        if (stereo)
+            sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
+
+        while (bitcount--) {
+            int32_t *pp = ptable + ((sp [0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            uint32_t split = low + ((high - low) >> 8) * (*pp >> 16);
+
+            if (value <= split) {
+                high = split;
+                *pp += (UP - *pp) >> DECAY;
+                sp [0].filter0 = -1;
+            }
+            else {
+                low = split + 1;
+                *pp += (DOWN - *pp) >> DECAY;
+                sp [0].filter0 = 0;
+            }
+
+            while (DSD_BYTE_READY (high, low) && byteptr < endptr) {
+                value = (value << 8) | *byteptr++;
+                high = (high << 8) | 0xff;
+                low <<= 8;
+            }
+
+            sp [0].value += sp [0].filter6 << 3;
+            sp [0].byte = (sp [0].byte << 1) | (sp [0].filter0 & 1);
+            sp [0].factor += (((sp [0].value ^ sp [0].filter0) >> 31) | 1) & ((sp [0].value ^ (sp [0].value - (sp [0].filter6 << 4))) >> 31);
+            sp [0].filter1 += ((sp [0].filter0 & VALUE_ONE) - sp [0].filter1) >> 6;
+            sp [0].filter2 += ((sp [0].filter0 & VALUE_ONE) - sp [0].filter2) >> 4;
+            sp [0].filter3 += (sp [0].filter2 - sp [0].filter3) >> 4;
+            sp [0].filter4 += (sp [0].filter3 - sp [0].filter4) >> 4;
+            sp [0].value = (sp [0].filter4 - sp [0].filter5) >> 4;
+            sp [0].filter5 += sp [0].value;
+            sp [0].filter6 += (sp [0].value - sp [0].filter6) >> 3;
+            sp [0].value = sp [0].filter1 - sp [0].filter5 + ((sp [0].filter6 * sp [0].factor) >> 2);
+
+            if (!stereo)
+                continue;
+
+            pp = ptable + ((sp [1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            split = low + ((high - low) >> 8) * (*pp >> 16);
+
+            if (value <= split) {
+                high = split;
+                *pp += (UP - *pp) >> DECAY;
+                sp [1].filter0 = -1;
+            }
+            else {
+                low = split + 1;
+                *pp += (DOWN - *pp) >> DECAY;
+                sp [1].filter0 = 0;
+            }
+
+            while (DSD_BYTE_READY (high, low) && byteptr < endptr) {
+                value = (value << 8) | *byteptr++;
+                high = (high << 8) | 0xff;
+                low <<= 8;
+            }
+
+            sp [1].value += sp [1].filter6 << 3;
+            sp [1].byte = (sp [1].byte << 1) | (sp [1].filter0 & 1);
+            sp [1].factor += (((sp [1].value ^ sp [1].filter0) >> 31) | 1) & ((sp [1].value ^ (sp [1].value - (sp [1].filter6 << 4))) >> 31);
+            sp [1].filter1 += ((sp [1].filter0 & VALUE_ONE) - sp [1].filter1) >> 6;
+            sp [1].filter2 += ((sp [1].filter0 & VALUE_ONE) - sp [1].filter2) >> 4;
+            sp [1].filter3 += (sp [1].filter2 - sp [1].filter3) >> 4;
+            sp [1].filter4 += (sp [1].filter3 - sp [1].filter4) >> 4;
+            sp [1].value = (sp [1].filter4 - sp [1].filter5) >> 4;
+            sp [1].filter5 += sp [1].value;
+            sp [1].filter6 += (sp [1].value - sp [1].filter6) >> 3;
+            sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
+        }
+
+        crc += (crc << 1) + (*dst32_l++ = sp [0].byte & 0xff);
+        sp [0].factor -= (sp [0].factor + 512) >> 10;
+
+        if (stereo) {
+            crc += (crc << 1) + (*dst32_r++ = filters [1].byte & 0xff);
+            filters [1].factor -= (filters [1].factor + 512) >> 10;
+        }
+    }
+
+    if (wv_check_crc(s, crc, 0))
+        return AVERROR_INVALIDDATA;
+
+    return 0;
+}
+
+/*---------------- DSD LOW ---------------*/
+/*----------------------------------------*/
 
 static inline int wv_unpack_stereo_dsd(WavpackFrameContext *s, GetBitContext *gb,
                                        void *dst_l, void *dst_r, const int type)
@@ -968,12 +1151,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             rate_x = 1 << bytestream2_get_byte(&gb);
             s->dsd_mode = bytestream2_get_byte(&gb);
             av_log(avctx, AV_LOG_WARNING, "got a DSD block, size = %i, mode = %d\n", size, s->dsd_mode);
-
-            s->sc.offset = bytestream2_tell(&gb);
-            s->sc.size   = size * 8;
-            if ((ret = init_get_bits8(&s->gb, gb.buffer, size)) < 0)
-                return ret;
-            s->data_size = size * 8;
+            s->dsd_bytes = size-2;
+            s->dsd_data = gb.buffer;
             bytestream2_skip(&gb, size-2);
             got_dsd      = 1;
             break;
@@ -1132,16 +1311,24 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     wc->ch_offset += 1 + s->stereo;
 
     if (s->stereo_in) {
-        if (got_dsd)
+        if (got_dsd) {
+            if (s->dsd_mode == 3)
+                wv_unpack_dsd_high(s, samples_l, samples_r);
+
             ret = wv_unpack_stereo_dsd(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+        }
         else
             ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
 
         if (ret < 0)
             return ret;
     } else {
-        if (got_dsd)
+        if (got_dsd) {
+            if (s->dsd_mode == 3)
+                wv_unpack_dsd_high(s, samples_l, NULL);
+
             ret = wv_unpack_mono_dsd(s, &s->gb, samples_l, avctx->sample_fmt);
+        }
         else
             ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
 
