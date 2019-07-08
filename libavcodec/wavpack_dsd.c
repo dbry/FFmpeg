@@ -703,6 +703,8 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
+    free (ptable);
+
     if (wv_check_crc(s, crc, 0))
         return AVERROR_INVALIDDATA;
 
@@ -710,6 +712,176 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 }
 
 /*---------------- DSD LOW ---------------*/
+
+#define MAX_HISTORY_BITS    5
+
+static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    int32_t *dst32_l          = dst_l;
+    int32_t *dst32_r          = dst_r;
+    const uint8_t *byteptr = s->dsd_data;
+    const uint8_t *endptr = byteptr + s->dsd_bytes;
+    unsigned char history_bits, max_probability;
+    int total_summed_probabilities = 0, i;
+    int total_samples = s->samples;
+    uint32_t crc = 0xFFFFFFFF;
+
+    unsigned char (*probabilities) [256], **value_lookup;
+    int history_bins, p0, p1, chan;
+    int16_t (*summed_probabilities) [256];
+    uint32_t low, high, value;
+
+    if (byteptr == endptr)
+        return AVERROR_INVALIDDATA;
+
+    history_bits = *byteptr++;
+
+    if (byteptr == endptr || history_bits > MAX_HISTORY_BITS)
+        return AVERROR_INVALIDDATA;
+
+    history_bins = 1 << history_bits;
+
+    value_lookup = (unsigned char **)malloc (sizeof (*value_lookup) * history_bins);
+    memset (value_lookup, 0, sizeof (*value_lookup) * history_bins);
+    summed_probabilities = (int16_t (*)[256])malloc (sizeof (*summed_probabilities) * history_bins);
+    probabilities = (unsigned char (*)[256])malloc (sizeof (*probabilities) * history_bins);
+
+    max_probability = *byteptr++;
+
+    if (max_probability < 0xff) {
+        unsigned char *outptr = (unsigned char *) probabilities;
+        unsigned char *outend = outptr + sizeof (*probabilities) * history_bins;
+
+        while (outptr < outend && byteptr < endptr) {
+            int code = *byteptr++;
+
+            if (code > max_probability) {
+                int zcount = code - max_probability;
+
+                while (outptr < outend && zcount--)
+                    *outptr++ = 0;
+            }
+            else if (code)
+                *outptr++ = code;
+            else
+                break;
+        }
+
+        if (outptr < outend || (byteptr < endptr && *byteptr++))
+            return AVERROR_INVALIDDATA;
+    }
+    else if (endptr - byteptr > (int) sizeof (*probabilities) * history_bins) {
+        memcpy (probabilities, byteptr, sizeof (*probabilities) * history_bins);
+        byteptr += sizeof (*probabilities) * history_bins;
+    }
+    else
+        return AVERROR_INVALIDDATA;
+
+    for (p0 = 0; p0 < history_bins; ++p0) {
+        int32_t sum_values;
+        unsigned char *vp;
+
+        for (sum_values = i = 0; i < 256; ++i)
+            summed_probabilities [p0] [i] = sum_values += probabilities [p0] [i];
+
+        if (sum_values) {
+            total_summed_probabilities += sum_values;
+            vp = value_lookup [p0] = (unsigned char *)malloc (sum_values);
+
+            for (i = 0; i < 256; i++) {
+                int c = probabilities [p0] [i];
+
+                while (c--)
+                    *vp++ = i;
+            }
+        }
+    }
+
+    if (endptr - byteptr < 4 || total_summed_probabilities > history_bins * 1280)
+        return AVERROR_INVALIDDATA;
+
+    for (i = 4; i--;)
+        value = (value << 8) | *byteptr++;
+
+    chan = p0 = p1 = 0;
+    low = 0; high = 0xffffffff;
+
+    if (dst_r)
+        total_samples *= 2;
+
+    while (total_samples--) {
+        int mult, index, code, i;
+
+        if (!summed_probabilities [p0] [255])
+            return 0;
+
+        mult = (high - low) / summed_probabilities [p0] [255];
+
+        if (!mult) {
+            if (endptr - byteptr >= 4)
+                for (i = 4; i--;)
+                    value = (value << 8) | *byteptr++;
+
+            low = 0;
+            high = 0xffffffff;
+            mult = high / summed_probabilities [p0] [255];
+
+            if (!mult)
+                return 0;
+        }
+
+        index = (value - low) / mult;
+
+        if (index >= summed_probabilities [p0] [255])
+            return 0;
+
+        if (!dst_r) {
+            if ((*dst32_l++ = code = value_lookup [p0] [index]))
+                low += summed_probabilities [p0] [code-1] * mult;
+        }
+        else {
+            if ((code = value_lookup [p0] [index]))
+                low += summed_probabilities [p0] [code-1] * mult;
+
+            if (chan)
+                *dst32_r++ = code;
+            else
+                *dst32_l++ = code;
+
+            chan ^= 1;
+        }
+
+        high = low + probabilities [p0] [code] * mult - 1;
+        crc += (crc << 1) + code;
+
+        if (!dst_r)
+            p0 = code & (history_bins-1);
+        else {
+            p0 = p1;
+            p1 = code & (history_bins-1);
+        }
+
+        while (DSD_BYTE_READY (high, low) && byteptr < endptr) {
+            value = (value << 8) | *byteptr++;
+            high = (high << 8) | 0xff;
+            low <<= 8;
+        }
+    }
+
+    free (probabilities);
+    free (summed_probabilities);
+
+    for (p0 = 0; p0 < history_bins; ++p0)
+        free (value_lookup [p0]);
+
+    free (value_lookup);
+
+    if (wv_check_crc(s, crc, 0))
+        return AVERROR_INVALIDDATA;
+
+    return 0;
+}
+
 /*----------------------------------------*/
 
 static inline int wv_unpack_stereo_dsd(WavpackFrameContext *s, GetBitContext *gb,
@@ -1450,8 +1622,12 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
     if (s->stereo_in) {
         if (got_dsd) {
-            if (s->dsd_mode == 3) {
-                ret = wv_unpack_dsd_high(s, samples_l, samples_r);
+            if (s->dsd_mode) {
+                if (s->dsd_mode == 3)
+                    ret = wv_unpack_dsd_high(s, samples_l, samples_r);
+                else
+                    ret = wv_unpack_dsd_fast(s, samples_l, samples_r);
+
                 decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
                 decimate_dsd_run (s->dsd_decimator_r, samples_r, s->samples);
             }
@@ -1465,8 +1641,12 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             return ret;
     } else {
         if (got_dsd) {
-            if (s->dsd_mode == 3) {
-                ret = wv_unpack_dsd_high(s, samples_l, NULL);
+            if (s->dsd_mode) {
+                if (s->dsd_mode == 3)
+                    ret = wv_unpack_dsd_high(s, samples_l, NULL);
+                else
+                    ret = wv_unpack_dsd_fast(s, samples_l, NULL);
+
                 decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
             }
             else
