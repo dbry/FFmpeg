@@ -517,19 +517,6 @@ static void decimate_dsd_destroy (void *decimate_context)
     free (context);
 }
 
-/*-----------------------------------------*/
-
-// Return a random value in the range: 0.0 <= n < 1.0
-
-static double frandom (void)
-{
-    static uint64_t random = 0x3141592653589793;
-    random = ((random << 4) - random) ^ 1;
-    random = ((random << 4) - random) ^ 1;
-    random = ((random << 4) - random) ^ 1;
-    return (random >> 32) / 4294967296.0;
-}
-
 /*---------------- DSD HIGH ---------------*/
 
 typedef struct {
@@ -882,43 +869,34 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     return 0;
 }
 
+/*-------------- DSD COPY ----------------*/
+
+static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    int32_t *dst32_l          = dst_l;
+    int32_t *dst32_r          = dst_r;
+    const uint8_t *byteptr = s->dsd_data;
+    const uint8_t *endptr = byteptr + s->dsd_bytes;
+    int total_samples = s->samples;
+    uint32_t crc = 0xFFFFFFFF;
+
+    if (endptr - byteptr != total_samples * (dst_r ? 2 : 1))
+        return AVERROR_INVALIDDATA;
+
+    while (total_samples--) {
+        crc += (crc << 1) + (*dst32_l++ = *byteptr++);
+
+        if (dst_r)
+            crc += (crc << 1) + (*dst32_r++ = *byteptr++);
+    }
+
+    if (wv_check_crc(s, crc, 0))
+        return AVERROR_INVALIDDATA;
+
+    return 0;
+}
+
 /*----------------------------------------*/
-
-static inline int wv_unpack_stereo_dsd(WavpackFrameContext *s, GetBitContext *gb,
-                                       void *dst_l, void *dst_r, const int type)
-{
-    int count = 0;
-    float *dstfl_l          = dst_l;
-    float *dstfl_r          = dst_r;
-
-    av_log(s->avctx, AV_LOG_WARNING, "wv_unpack_stereo_dsd() called, type = %d, samples = %d\n", type, s->samples);
-
-    do {
-        *dstfl_l++ = (frandom() * 0.1) - 0.05;
-        *dstfl_r++ = (frandom() * 0.1) - 0.05;
-        count++;
-    } while (count < s->samples);
-
-    wv_reset_saved_context(s);
-    return 0;
-}
-
-static inline int wv_unpack_mono_dsd(WavpackFrameContext *s, GetBitContext *gb,
-                                       void *dst, const int type)
-{
-    int count = 0;
-    float *dstfl          = dst;
-
-    av_log(s->avctx, AV_LOG_WARNING, "wv_unpack_mono_dsd() called, type = %d, samples = %d\n", type, s->samples);
-
-    do {
-        *dstfl++ = (frandom() * 0.1) - 0.05;
-        count++;
-    } while (count < s->samples);
-
-    wv_reset_saved_context(s);
-    return 0;
-}
 
 static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
                                    void *dst_l, void *dst_r, const int type)
@@ -1614,25 +1592,14 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
     wc->ch_offset += 1 + s->stereo;
 
-    if (!s->dsd_decimator_l) {
-        s->dsd_decimator_l = decimate_dsd_init (1);
-        s->dsd_decimator_r = decimate_dsd_init (1);
-        av_log(avctx, AV_LOG_WARNING, "Initialized decimators.\n");
-    }
-
     if (s->stereo_in) {
         if (got_dsd) {
-            if (s->dsd_mode) {
-                if (s->dsd_mode == 3)
-                    ret = wv_unpack_dsd_high(s, samples_l, samples_r);
-                else
-                    ret = wv_unpack_dsd_fast(s, samples_l, samples_r);
-
-                decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
-                decimate_dsd_run (s->dsd_decimator_r, samples_r, s->samples);
-            }
+            if (s->dsd_mode == 3)
+                ret = wv_unpack_dsd_high(s, samples_l, samples_r);
+            else if (s->dsd_mode == 1)
+                ret = wv_unpack_dsd_fast(s, samples_l, samples_r);
             else
-                ret = wv_unpack_stereo_dsd(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+                ret = wv_unpack_dsd_copy(s, samples_l, samples_r);
         }
         else
             ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
@@ -1641,16 +1608,12 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             return ret;
     } else {
         if (got_dsd) {
-            if (s->dsd_mode) {
-                if (s->dsd_mode == 3)
-                    ret = wv_unpack_dsd_high(s, samples_l, NULL);
-                else
-                    ret = wv_unpack_dsd_fast(s, samples_l, NULL);
-
-                decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
-            }
+            if (s->dsd_mode == 3)
+                ret = wv_unpack_dsd_high(s, samples_l, NULL);
+            else if (s->dsd_mode == 1)
+                ret = wv_unpack_dsd_fast(s, samples_l, NULL);
             else
-                ret = wv_unpack_mono_dsd(s, &s->gb, samples_l, avctx->sample_fmt);
+                ret = wv_unpack_dsd_copy(s, samples_l, NULL);
         }
         else
             ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
@@ -1660,6 +1623,20 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
         if (s->stereo)
             memcpy(samples_r, samples_l, bpp * s->samples);
+    }
+
+    if (got_dsd) {
+        if (!s->dsd_decimator_l)
+            s->dsd_decimator_l = decimate_dsd_init (1);
+
+        decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
+
+        if (s->stereo) {
+            if (!s->dsd_decimator_r)
+                s->dsd_decimator_r = decimate_dsd_init (1);
+
+            decimate_dsd_run (s->dsd_decimator_r, samples_r, s->samples);
+        }
     }
 
     return 0;
