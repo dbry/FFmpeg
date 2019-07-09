@@ -24,7 +24,6 @@
 #include "cbs_internal.h"
 #include "cbs_h264.h"
 #include "cbs_h265.h"
-#include "golomb.h"
 #include "h264.h"
 #include "h264_sei.h"
 #include "h2645_parse.h"
@@ -1644,10 +1643,10 @@ int ff_cbs_h264_add_sei_message(CodedBitstreamContext *ctx,
     return 0;
 }
 
-int ff_cbs_h264_delete_sei_message(CodedBitstreamContext *ctx,
-                                   CodedBitstreamFragment *au,
-                                   CodedBitstreamUnit *nal,
-                                   int position)
+void ff_cbs_h264_delete_sei_message(CodedBitstreamContext *ctx,
+                                    CodedBitstreamFragment *au,
+                                    CodedBitstreamUnit *nal,
+                                    int position)
 {
     H264RawSEI *sei = nal->content;
 
@@ -1662,9 +1661,8 @@ int ff_cbs_h264_delete_sei_message(CodedBitstreamContext *ctx,
             if (&au->units[i] == nal)
                 break;
         }
-        av_assert0(i < au->nb_units && "NAL unit not in access unit.");
 
-        return ff_cbs_delete_unit(ctx, au, i);
+        ff_cbs_delete_unit(ctx, au, i);
     } else {
         cbs_h264_free_sei_payload(&sei->payload[position]);
 
@@ -1672,7 +1670,5 @@ int ff_cbs_h264_delete_sei_message(CodedBitstreamContext *ctx,
         memmove(sei->payload + position,
                 sei->payload + position + 1,
                 (sei->payload_count - position) * sizeof(*sei->payload));
-
-        return 0;
     }
 }

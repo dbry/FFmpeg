@@ -1409,6 +1409,10 @@ single-precision floating-point
 16-bit integers
 @end table
 
+@item mix
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item response
 Show IR frequency response, magnitude and phase in additional video stream.
 By default it is disabled.
@@ -1523,6 +1527,10 @@ kHz
 @item width, w
 Specify the band-width of a filter in width_type units.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -1542,6 +1550,10 @@ Syntax for the command is : "@var{width_type}"
 @item width, w
 Change allpass width.
 Syntax for the command is : "@var{width}"
+
+@item mix, m
+Change allpass mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section aloop
@@ -2460,6 +2472,10 @@ kHz
 @item width, w
 Specify the band-width of a filter in width_type units.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -2479,6 +2495,10 @@ Syntax for the command is : "@var{width_type}"
 @item width, w
 Change bandpass width.
 Syntax for the command is : "@var{width}"
+
+@item mix, m
+Change bandpass mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section bandreject
@@ -2511,6 +2531,10 @@ kHz
 @item width, w
 Specify the band-width of a filter in width_type units.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -2530,6 +2554,10 @@ Syntax for the command is : "@var{width_type}"
 @item width, w
 Change bandreject width.
 Syntax for the command is : "@var{width}"
+
+@item mix, m
+Change bandreject mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section bass, lowshelf
@@ -2569,6 +2597,10 @@ kHz
 @item width, w
 Determine how steep is the filter's shelf transition.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -2592,6 +2624,10 @@ Syntax for the command is : "@var{width}"
 @item gain, g
 Change bass gain.
 Syntax for the command is : "@var{gain}"
+
+@item mix, m
+Change bass mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section biquad
@@ -2614,6 +2650,10 @@ This filter supports the following commands:
 @item b2
 Change biquad parameter.
 Syntax for the command is : "@var{value}"
+
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
 @end table
 
 @section bs2b
@@ -3045,6 +3085,42 @@ Optional. It should have a value much less than 1 (e.g. 0.05 or 0.02) and is
 used to prevent clipping.
 @end table
 
+@section deesser
+
+Apply de-essing to the audio samples.
+
+@table @option
+@item i
+Set intensity for triggering de-essing. Allowed range is from 0 to 1.
+Default is 0.
+
+@item m
+Set amount of ducking on treble part of sound. Allowed range is from 0 to 1.
+Default is 0.5.
+
+@item f
+How much of original frequency content to keep when de-essing. Allowed range is from 0 to 1.
+Default is 0.5.
+
+@item s
+Set the output mode.
+
+It accepts the following values:
+@table @option
+@item i
+Pass input unchanged.
+
+@item o
+Pass ess filtered out.
+
+@item e
+Pass only ess.
+
+Default value is @var{o}.
+@end table
+
+@end table
+
 @section drmeter
 Measure audio dynamic range.
 
@@ -3267,6 +3343,10 @@ Specify the band-width of a filter in width_type units.
 Set the required gain or attenuation in dB.
 Beware of clipping when using a positive gain.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -3305,6 +3385,10 @@ Syntax for the command is : "@var{width}"
 @item gain, g
 Change equalizer gain.
 Syntax for the command is : "@var{gain}"
+
+@item mix, m
+Change equalizer mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section extrastereo
@@ -3728,6 +3812,10 @@ Specify the band-width of a filter in width_type units.
 Applies only to double-pole filter.
 The default is 0.707q and gives a Butterworth response.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -3747,6 +3835,10 @@ Syntax for the command is : "@var{width_type}"
 @item width, w
 Change highpass width.
 Syntax for the command is : "@var{width}"
+
+@item mix, m
+Change highpass mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section join
@@ -4036,6 +4128,10 @@ Specify the band-width of a filter in width_type units.
 Applies only to double-pole filter.
 The default is 0.707q and gives a Butterworth response.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -4064,6 +4160,10 @@ Syntax for the command is : "@var{width_type}"
 @item width, w
 Change lowpass width.
 Syntax for the command is : "@var{width}"
+
+@item mix, m
+Change lowpass mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section lv2
@@ -5104,6 +5204,10 @@ kHz
 @item width, w
 Determine how steep is the filter's shelf transition.
 
+@item mix, m
+How much to use filtered signal in output. Default is 1.
+Range is between 0 and 1.
+
 @item channels, c
 Specify which channels to filter, by default all available are filtered.
 @end table
@@ -5127,6 +5231,10 @@ Syntax for the command is : "@var{width}"
 @item gain, g
 Change treble gain.
 Syntax for the command is : "@var{gain}"
+
+@item mix, m
+Change treble mix.
+Syntax for the command is : "@var{mix}"
 @end table
 
 @section tremolo
@@ -8966,6 +9074,17 @@ to each other, so you can for example specify @code{y=x/dar}.
 
 @item pict_type
 A one character description of the current frame's picture type.
+
+@item pkt_pos
+The current packet's position in the input file or stream
+(in bytes, from the start of the input). A value of -1 indicates
+this info is not available.
+
+@item pkt_duration
+The current packet's duration, in seconds.
+
+@item pkt_size
+The current packet's size (in bytes).
 @end table
 
 @anchor{drawtext_expansion}
@@ -14570,6 +14689,9 @@ Set the black color threshold. Default is @code{0.15}. Allowed range is @code{[0
 @item chp
 Enable checking the parity bit. In the event of a parity error, the filter will output
 @code{0x00} for that character. Default is false.
+
+@item lp
+Lowpass lines prior further proccessing. Default is disabled.
 @end table
 
 @subsection Examples
@@ -15115,6 +15237,8 @@ Set color space conforming to the United States Federal Communications
 Commission (FCC) Code of Federal Regulations (CFR) Title 47 (2003) 73.682 (a).
 
 @item bt601
+@item bt470
+@item smpte170m
 Set color space conforming to:
 
 @itemize
@@ -15131,6 +15255,9 @@ Society of Motion Picture and Television Engineers (SMPTE) ST 170:2004
 
 @item smpte240m
 Set color space conforming to SMPTE ST 240:1999.
+
+@item bt2020
+Set color space conforming to ITU-R BT.2020 non-constant luminance system.
 @end table
 
 @item in_range
@@ -16598,9 +16725,12 @@ Efficient Sub-Pixel Convolutional Neural Network model (ESPCN).
 See @url{https://arxiv.org/abs/1609.05158}.
 @end itemize
 
-Training scripts as well as scripts for model generation can be found at
+Training scripts as well as scripts for model file (.pb) saving can be found at
 @url{https://github.com/XueweiMeng/sr/tree/sr_dnn_native}. Original repository
 is at @url{https://github.com/HighVoltageRocknRoll/sr.git}.
+
+Native model files (.model) can be generated from TensorFlow model
+files (.pb) by using tools/python/convert.py
 
 The filter accepts the following options:
 
