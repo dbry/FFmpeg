@@ -35,6 +35,29 @@
  * WavPack lossless audio decoder
  */
 
+typedef struct {
+    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
+} DSDfilters;
+
+#define DSD_BYTE_READY(low,high) (!(((low) ^ (high)) & 0xff000000))
+
+#define PTABLE_BITS 8
+#define PTABLE_BINS (1<<PTABLE_BITS)
+#define PTABLE_MASK (PTABLE_BINS-1)
+
+#define UP   0x010000fe
+#define DOWN 0x00010000
+#define DECAY 8
+
+#define PRECISION 20
+#define VALUE_ONE (1 << PRECISION)
+#define PRECISION_USE 12
+
+#define RATE_S 20
+
+#define MAX_HISTORY_BITS    5
+#define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
+
 typedef struct SavedContext {
     int offset;
     int size;
@@ -68,8 +91,13 @@ typedef struct WavpackFrameContext {
     WvChannel ch[2];
     int pos;
     SavedContext sc, extra_sc;
+
     GetByteContext dsd_gb;
     void *dsd_decimator_l, *dsd_decimator_r;
+    int ptable [PTABLE_BINS];
+    int16_t summed_probabilities [MAX_HISTORY_BINS] [256];
+    unsigned char probabilities [MAX_HISTORY_BINS] [256];
+    unsigned char *value_lookup [MAX_HISTORY_BINS];
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -518,26 +546,6 @@ static void decimate_dsd_destroy (void *decimate_context)
 
 /*---------------- DSD HIGH ---------------*/
 
-typedef struct {
-    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
-} DSDfilters;
-
-#define DSD_BYTE_READY(low,high) (!(((low) ^ (high)) & 0xff000000))
-
-#define PTABLE_BITS 8
-#define PTABLE_BINS (1<<PTABLE_BITS)
-#define PTABLE_MASK (PTABLE_BINS-1)
-
-#define UP   0x010000fe
-#define DOWN 0x00010000
-#define DECAY 8
-
-#define PRECISION 20
-#define VALUE_ONE (1 << PRECISION)
-#define PRECISION_USE 12
-
-#define RATE_S 20
-
 static void init_ptable (int *table, int rate_i, int rate_s)
 {
     int value = 0x808000, rate = rate_i << 8, c, i;
@@ -566,7 +574,6 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     uint32_t low, high, value;
     uint32_t crc = 0xFFFFFFFF;
     DSDfilters filters [2], *sp = filters;
-    int32_t *ptable;
     int total_samples = s->samples, stereo = (!dst_r) ? 0 : 1;
 
     if (bytestream2_get_bytes_left(&s->dsd_gb) < (!dst_r ? 13 : 20))
@@ -578,8 +585,7 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     if (rate_s != RATE_S)
         return AVERROR_INVALIDDATA;
 
-    ptable = (int32_t *)malloc (PTABLE_BINS * sizeof (*ptable));
-    init_ptable (ptable, rate_i, rate_s);
+    init_ptable (s->ptable, rate_i, rate_s);
 
     for (channel = 0; channel < (!dst_r ? 1 : 2); ++channel) {
         DSDfilters *sp = filters + channel;
@@ -610,7 +616,7 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
             sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
 
         while (bitcount--) {
-            int32_t *pp = ptable + ((sp [0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            int32_t *pp = s->ptable + ((sp [0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
             uint32_t split = low + ((high - low) >> 8) * (*pp >> 16);
 
             if (value <= split) {
@@ -645,7 +651,7 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
             if (!stereo)
                 continue;
 
-            pp = ptable + ((sp [1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            pp = s->ptable + ((sp [1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
             split = low + ((high - low) >> 8) * (*pp >> 16);
 
             if (value <= split) {
@@ -687,8 +693,6 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
-    free (ptable);
-
     if (wv_check_crc(s, crc, 0))
         return AVERROR_INVALIDDATA;
 
@@ -696,8 +700,6 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 }
 
 /*---------------- DSD LOW ---------------*/
-
-#define MAX_HISTORY_BITS    5
 
 static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
@@ -708,9 +710,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     int total_samples = s->samples;
     uint32_t crc = 0xFFFFFFFF;
 
-    unsigned char (*probabilities) [256], **value_lookup;
     int history_bins, p0, p1, chan;
-    int16_t (*summed_probabilities) [256];
     uint32_t low, high, value;
 
     if (!bytestream2_get_bytes_left(&s->dsd_gb))
@@ -723,16 +723,11 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
     history_bins = 1 << history_bits;
 
-    value_lookup = (unsigned char **)malloc (sizeof (*value_lookup) * history_bins);
-    memset (value_lookup, 0, sizeof (*value_lookup) * history_bins);
-    summed_probabilities = (int16_t (*)[256])malloc (sizeof (*summed_probabilities) * history_bins);
-    probabilities = (unsigned char (*)[256])malloc (sizeof (*probabilities) * history_bins);
-
     max_probability = bytestream2_get_byte(&s->dsd_gb);
 
     if (max_probability < 0xff) {
-        unsigned char *outptr = (unsigned char *) probabilities;
-        unsigned char *outend = outptr + sizeof (*probabilities) * history_bins;
+        unsigned char *outptr = (unsigned char *) s->probabilities;
+        unsigned char *outend = outptr + sizeof (*s->probabilities) * history_bins;
 
         while (outptr < outend && bytestream2_get_bytes_left(&s->dsd_gb)) {
             int code = bytestream2_get_byte(&s->dsd_gb);
@@ -752,8 +747,8 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         if (outptr < outend || (bytestream2_get_bytes_left(&s->dsd_gb) && bytestream2_get_byte(&s->dsd_gb)))
             return AVERROR_INVALIDDATA;
     }
-    else if (bytestream2_get_bytes_left(&s->dsd_gb) > (int) sizeof (*probabilities) * history_bins)
-        bytestream2_get_buffer(&s->dsd_gb, (uint8_t *) probabilities, sizeof (*probabilities) * history_bins);
+    else if (bytestream2_get_bytes_left(&s->dsd_gb) > (int) sizeof (*s->probabilities) * history_bins)
+        bytestream2_get_buffer(&s->dsd_gb, (uint8_t *) s->probabilities, sizeof (*s->probabilities) * history_bins);
     else
         return AVERROR_INVALIDDATA;
 
@@ -762,14 +757,14 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         unsigned char *vp;
 
         for (sum_values = i = 0; i < 256; ++i)
-            summed_probabilities [p0] [i] = sum_values += probabilities [p0] [i];
+            s->summed_probabilities [p0] [i] = sum_values += s->probabilities [p0] [i];
 
         if (sum_values) {
             total_summed_probabilities += sum_values;
-            vp = value_lookup [p0] = (unsigned char *)malloc (sum_values);
+            vp = s->value_lookup [p0] = (unsigned char *)malloc (sum_values);
 
             for (i = 0; i < 256; i++) {
-                int c = probabilities [p0] [i];
+                int c = s->probabilities [p0] [i];
 
                 while (c--)
                     *vp++ = i;
@@ -792,10 +787,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     while (total_samples--) {
         int mult, index, code, i;
 
-        if (!summed_probabilities [p0] [255])
+        if (!s->summed_probabilities [p0] [255])
             return 0;
 
-        mult = (high - low) / summed_probabilities [p0] [255];
+        mult = (high - low) / s->summed_probabilities [p0] [255];
 
         if (!mult) {
             if (bytestream2_get_bytes_left(&s->dsd_gb) >= 4)
@@ -804,7 +799,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
             low = 0;
             high = 0xffffffff;
-            mult = high / summed_probabilities [p0] [255];
+            mult = high / s->summed_probabilities [p0] [255];
 
             if (!mult)
                 return 0;
@@ -812,16 +807,16 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
         index = (value - low) / mult;
 
-        if (index >= summed_probabilities [p0] [255])
+        if (index >= s->summed_probabilities [p0] [255])
             return 0;
 
         if (!dst_r) {
-            if ((*dst32_l++ = code = value_lookup [p0] [index]))
-                low += summed_probabilities [p0] [code-1] * mult;
+            if ((*dst32_l++ = code = s->value_lookup [p0] [index]))
+                low += s->summed_probabilities [p0] [code-1] * mult;
         }
         else {
-            if ((code = value_lookup [p0] [index]))
-                low += summed_probabilities [p0] [code-1] * mult;
+            if ((code = s->value_lookup [p0] [index]))
+                low += s->summed_probabilities [p0] [code-1] * mult;
 
             if (chan)
                 *dst32_r++ = code;
@@ -831,7 +826,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
             chan ^= 1;
         }
 
-        high = low + probabilities [p0] [code] * mult - 1;
+        high = low + s->probabilities [p0] [code] * mult - 1;
         crc += (crc << 1) + code;
 
         if (!dst_r)
@@ -848,13 +843,11 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
-    free (probabilities);
-    free (summed_probabilities);
-
     for (p0 = 0; p0 < history_bins; ++p0)
-        free (value_lookup [p0]);
-
-    free (value_lookup);
+        if (s->value_lookup [p0]) {
+            free (s->value_lookup [p0]);
+            s->value_lookup [p0] = NULL;
+        }
 
     if (wv_check_crc(s, crc, 0))
         return AVERROR_INVALIDDATA;
