@@ -708,10 +708,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     unsigned char history_bits, max_probability;
     int total_summed_probabilities = 0, i;
     int total_samples = s->samples;
-    uint32_t crc = 0xFFFFFFFF;
-
     int history_bins, p0, p1, chan;
+    uint32_t crc = 0xFFFFFFFF;
     uint32_t low, high, value;
+    int ret = 0;
 
     if (!bytestream2_get_bytes_left(&s->dsd_gb))
         return AVERROR_INVALIDDATA;
@@ -761,7 +761,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
         if (sum_values) {
             total_summed_probabilities += sum_values;
-            vp = s->value_lookup [p0] = (unsigned char *)malloc (sum_values);
+            vp = s->value_lookup [p0] = av_malloc (sum_values);
 
             for (i = 0; i < 256; i++) {
                 int c = s->probabilities [p0] [i];
@@ -772,8 +772,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
-    if (bytestream2_get_bytes_left(&s->dsd_gb) < 4 || total_summed_probabilities > history_bins * 1280)
-        return AVERROR_INVALIDDATA;
+    if (bytestream2_get_bytes_left(&s->dsd_gb) < 4 || total_summed_probabilities > history_bins * 1280) {
+        ret = AVERROR_INVALIDDATA;
+        goto done;
+    }
 
     for (i = 4; i--;)
         value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
@@ -843,16 +845,17 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
+done:
     for (p0 = 0; p0 < history_bins; ++p0)
         if (s->value_lookup [p0]) {
-            free (s->value_lookup [p0]);
+            av_free (s->value_lookup [p0]);
             s->value_lookup [p0] = NULL;
         }
 
     if (wv_check_crc(s, crc, 0))
-        return AVERROR_INVALIDDATA;
+        ret = AVERROR_INVALIDDATA;
 
-    return 0;
+    return ret;
 }
 
 /*-------------- DSD COPY ----------------*/
