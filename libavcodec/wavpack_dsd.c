@@ -568,8 +568,8 @@ static void init_ptable (int *table, int rate_i, int rate_s)
 
 static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    int32_t *dst32_l          = dst_l;
-    int32_t *dst32_r          = dst_r;
+    uint8_t *dsd_l            = dst_l;
+    uint8_t *dsd_r            = dst_r;
     int channel, rate_i, rate_s, i;
     uint32_t low, high, value;
     uint32_t crc = 0xFFFFFFFF;
@@ -606,6 +606,11 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
     for (i = 4; i--;)
         value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+
+    memset (dst_l, 0, total_samples * 4);
+
+    if (stereo)
+        memset (dst_r, 0, total_samples * 4);
 
     while (total_samples--) {
         int bitcount = 8;
@@ -684,12 +689,14 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
             sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
         }
 
-        crc += (crc << 1) + (*dst32_l++ = sp [0].byte & 0xff);
+        crc += (crc << 1) + (*dsd_l = sp [0].byte & 0xff);
         sp [0].factor -= (sp [0].factor + 512) >> 10;
+        dsd_l += 4;
 
         if (stereo) {
-            crc += (crc << 1) + (*dst32_r++ = filters [1].byte & 0xff);
+            crc += (crc << 1) + (*dsd_r = filters [1].byte & 0xff);
             filters [1].factor -= (filters [1].factor + 512) >> 10;
+            dsd_r += 4;
         }
     }
 
@@ -703,8 +710,8 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
 static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    int32_t *dst32_l          = dst_l;
-    int32_t *dst32_r          = dst_r;
+    uint8_t *dsd_l            = dst_l;
+    uint8_t *dsd_r            = dst_r;
     unsigned char history_bits, max_probability;
     int total_summed_probabilities = 0, i;
     int total_samples = s->samples;
@@ -783,8 +790,12 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     chan = p0 = p1 = 0;
     low = 0; high = 0xffffffff;
 
-    if (dst_r)
+    memset (dst_l, 0, total_samples * 4);
+
+    if (dst_r) {
+        memset (dst_r, 0, total_samples * 4);
         total_samples *= 2;
+    }
 
     while (total_samples--) {
         int mult, index, code, i;
@@ -813,17 +824,23 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
             return 0;
 
         if (!dst_r) {
-            if ((*dst32_l++ = code = s->value_lookup [p0] [index]))
+            if ((*dsd_l = code = s->value_lookup [p0] [index]))
                 low += s->summed_probabilities [p0] [code-1] * mult;
+
+            dsd_l += 4;
         }
         else {
             if ((code = s->value_lookup [p0] [index]))
                 low += s->summed_probabilities [p0] [code-1] * mult;
 
-            if (chan)
-                *dst32_r++ = code;
-            else
-                *dst32_l++ = code;
+            if (chan) {
+                *dsd_r = code;
+                dsd_r += 4;
+            }
+            else {
+                *dsd_l = code;
+                dsd_l += 4;
+            }
 
             chan ^= 1;
         }
@@ -862,19 +879,27 @@ done:
 
 static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    int32_t *dst32_l          = dst_l;
-    int32_t *dst32_r          = dst_r;
+    uint8_t *dsd_l            = dst_l;
+    uint8_t *dsd_r            = dst_r;
     int total_samples = s->samples;
     uint32_t crc = 0xFFFFFFFF;
 
     if (bytestream2_get_bytes_left (&s->dsd_gb) != total_samples * (dst_r ? 2 : 1))
         return AVERROR_INVALIDDATA;
 
-    while (total_samples--) {
-        crc += (crc << 1) + (*dst32_l++ = bytestream2_get_byte(&s->dsd_gb));
+    memset (dst_l, 0, total_samples * 4);
 
-        if (dst_r)
-            crc += (crc << 1) + (*dst32_r++ = bytestream2_get_byte(&s->dsd_gb));
+    if (dst_r)
+        memset (dst_r, 0, total_samples * 4);
+
+    while (total_samples--) {
+        crc += (crc << 1) + (*dsd_l = bytestream2_get_byte(&s->dsd_gb));
+        dsd_l += 4;
+
+        if (dst_r) {
+            crc += (crc << 1) + (*dsd_r = bytestream2_get_byte(&s->dsd_gb));
+            dsd_r += 4;
+        }
     }
 
     if (wv_check_crc(s, crc, 0))
