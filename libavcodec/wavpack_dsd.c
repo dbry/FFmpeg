@@ -29,6 +29,7 @@
 #include "thread.h"
 #include "unary.h"
 #include "wavpack.h"
+#include "dsd.h"
 
 /**
  * @file
@@ -93,11 +94,11 @@ typedef struct WavpackFrameContext {
     SavedContext sc, extra_sc;
 
     GetByteContext dsd_gb;
-    void *dsd_decimator_l, *dsd_decimator_r;
     int ptable [PTABLE_BINS];
     int16_t summed_probabilities [MAX_HISTORY_BINS] [256];
     unsigned char probabilities [MAX_HISTORY_BINS] [256];
     unsigned char *value_lookup [MAX_HISTORY_BINS];
+    DSDContext dsdctx[2];
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -414,134 +415,6 @@ static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc,
     }
 
     return 0;
-}
-
-/*-------------- decimation -------------*/
-
-// 56 term decimation filter
-// < 0.5 dB down at 20 kHz
-// > 100 dB stopband attenuation (fs/12)
-
-static const int32_t decm_filter [] = {
-    4, 17, 56, 147, 336, 692, 1315, 2337,
-    3926, 6281, 9631, 14216, 20275, 28021, 37619, 49155,
-    62616, 77870, 94649, 112551, 131049, 149507, 167220, 183448,
-    197472, 208636, 216402, 220385, 220385, 216402, 208636, 197472,
-    183448, 167220, 149507, 131049, 112551, 94649, 77870, 62616,
-    49155, 37619, 28021, 20275, 14216, 9631, 6281, 3926,
-    2337, 1315, 692, 336, 147, 56, 17, 4,
-};
-
-#define NUM_FILTER_TERMS 56
-#define HISTORY_BYTES ((NUM_FILTER_TERMS+7)/8)
-
-typedef struct {
-    unsigned char delay [HISTORY_BYTES];
-} DecimationChannel;
-
-typedef struct {
-    int32_t conv_tables [HISTORY_BYTES] [256];
-    DecimationChannel *chans;
-    int num_channels;
-} DecimationContext;
-
-static void decimate_dsd_reset (void *decimate_context);
-
-static void *decimate_dsd_init (int num_channels)
-{
-    DecimationContext *context = (DecimationContext *)malloc (sizeof (DecimationContext));
-    double filter_sum = 0, filter_scale;
-    int skipped_terms, i, j;
-
-    if (!context)
-        return context;
-
-    memset (context, 0, sizeof (*context));
-    context->num_channels = num_channels;
-    context->chans = (DecimationChannel *)malloc (num_channels * sizeof (DecimationChannel));
-
-    if (!context->chans) {
-        free (context);
-        return NULL;
-    }
-
-    for (i = 0; i < NUM_FILTER_TERMS; ++i)
-        filter_sum += decm_filter [i];
-
-    filter_scale = ((1 << 23) - 1) / filter_sum * 16.0;
-
-    for (skipped_terms = i = 0; i < NUM_FILTER_TERMS; ++i) {
-        int scaled_term = (int) floor (decm_filter [i] * filter_scale + 0.5);
-
-        if (scaled_term) {
-            for (j = 0; j < 256; ++j)
-                if (j & (0x80 >> (i & 0x7)))
-                    context->conv_tables [i >> 3] [j] += scaled_term;
-                else
-                    context->conv_tables [i >> 3] [j] -= scaled_term;
-        }
-        else
-            skipped_terms++;
-    }
-
-    decimate_dsd_reset (context);
-
-    return context;
-}
-
-static void decimate_dsd_reset (void *decimate_context)
-{
-    DecimationContext *context = (DecimationContext *) decimate_context;
-    int chan = 0, i;
-
-    if (!context)
-        return;
-
-    for (chan = 0; chan < context->num_channels; ++chan)
-        for (i = 0; i < HISTORY_BYTES; ++i)
-            context->chans [chan].delay [i] = 0x55;
-}
-
-static void decimate_dsd_run (void *decimate_context, int32_t *samples, int num_samples)
-{
-    DecimationContext *context = (DecimationContext *) decimate_context;
-    int chan = 0;
-
-    if (!context)
-        return;
-
-    while (num_samples) {
-        DecimationChannel *sp = context->chans + chan;
-        int sum = 0;
-
-        sum += context->conv_tables [0] [sp->delay [0] = sp->delay [1]];
-        sum += context->conv_tables [1] [sp->delay [1] = sp->delay [2]];
-        sum += context->conv_tables [2] [sp->delay [2] = sp->delay [3]];
-        sum += context->conv_tables [3] [sp->delay [3] = sp->delay [4]];
-        sum += context->conv_tables [4] [sp->delay [4] = sp->delay [5]];
-        sum += context->conv_tables [5] [sp->delay [5] = sp->delay [6]];
-        sum += context->conv_tables [6] [sp->delay [6] = *samples];
-
-        *(float *) samples++ = sum / 134217728.0;
-
-        if (++chan == context->num_channels) {
-            num_samples--;
-            chan = 0;
-        }
-    }
-}
-
-static void decimate_dsd_destroy (void *decimate_context)
-{
-    DecimationContext *context = (DecimationContext *) decimate_context;
-
-    if (!context)
-        return;
-
-    if (context->chans)
-        free (context->chans);
-
-    free (context);
 }
 
 /*---------------- DSD HIGH ---------------*/
@@ -1122,6 +995,8 @@ static av_cold int wv_alloc_frame_context(WavpackContext *c)
         return -1;
     c->fdec_num++;
     c->fdec[c->fdec_num - 1]->avctx = c->avctx;
+    memset(c->fdec[c->fdec_num - 1]->dsdctx[0].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[0].buf));
+    memset(c->fdec[c->fdec_num - 1]->dsdctx[1].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[1].buf));
     wv_reset_saved_context(c->fdec[c->fdec_num - 1]);
 
     return 0;
@@ -1137,27 +1012,16 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 
     s->fdec_num = 0;
 
+    ff_init_dsd_data();
+
     return 0;
 }
 
 static av_cold int wavpack_decode_end(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
-    int i;
 
     av_log(avctx, AV_LOG_WARNING, "wavpack_dsd_decode_end() called\n");
-
-    for (i = 0; i < s->fdec_num; i++) {
-        WavpackFrameContext *frcxt = s->fdec[i];
-
-        if (frcxt->dsd_decimator_l)
-            decimate_dsd_destroy (frcxt->dsd_decimator_l);
-        if (frcxt->dsd_decimator_r)
-            decimate_dsd_destroy (frcxt->dsd_decimator_r);
-
-        av_log(avctx, AV_LOG_WARNING, "Destroyed decimators.\n");
-        av_freep(&s->fdec[i]);
-    }
 
     s->fdec_num = 0;
 
@@ -1637,17 +1501,10 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     }
 
     if (got_dsd) {
-        if (!s->dsd_decimator_l)
-            s->dsd_decimator_l = decimate_dsd_init (1);
+        ff_dsd2pcm_translate (&s->dsdctx [0], s->samples, 0, samples_l, 4, samples_l, 1);
 
-        decimate_dsd_run (s->dsd_decimator_l, samples_l, s->samples);
-
-        if (s->stereo) {
-            if (!s->dsd_decimator_r)
-                s->dsd_decimator_r = decimate_dsd_init (1);
-
-            decimate_dsd_run (s->dsd_decimator_r, samples_r, s->samples);
-        }
+        if (s->stereo)
+            ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
     }
 
     return 0;
