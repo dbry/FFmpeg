@@ -25,10 +25,7 @@
 #define BITSTREAM_READER_LE
 #include "avcodec.h"
 #include "bytestream.h"
-#include "get_bits.h"
 #include "internal.h"
-#include "thread.h"
-#include "unary.h"
 #include "wavpack.h"
 #include "dsd.h"
 
@@ -56,22 +53,12 @@
 #define MAX_HISTORY_BITS    5
 #define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
 
-typedef struct SavedContext {
-    int offset;
-    int size;
-    int bits_used;
-    uint32_t crc;
-} SavedContext;
-
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
     int frame_flags;
     int stereo, stereo_in;
     uint32_t CRC;
     int samples;
-    int pos;
-    SavedContext sc, extra_sc;
-
     GetByteContext dsd_gb;
     int ptable [PTABLE_BINS];
     int16_t summed_probabilities [MAX_HISTORY_BINS] [256];
@@ -92,12 +79,6 @@ typedef struct WavpackContext {
     int samples;
     int ch_offset;
 } WavpackContext;
-
-static void wv_reset_saved_context(WavpackFrameContext *s)
-{
-    s->pos    = 0;
-    s->sc.crc = s->extra_sc.crc = 0xFFFFFFFF;
-}
 
 static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc)
 {
@@ -491,7 +472,6 @@ static av_cold int wv_alloc_frame_context(WavpackContext *c)
     c->fdec[c->fdec_num - 1]->avctx = c->avctx;
     memset(c->fdec[c->fdec_num - 1]->dsdctx[0].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[0].buf));
     memset(c->fdec[c->fdec_num - 1]->dsdctx[1].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[1].buf));
-    wv_reset_saved_context(c->fdec[c->fdec_num - 1]);
 
     return 0;
 }
@@ -522,7 +502,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                                 AVFrame *frame, const uint8_t *buf, int buf_size)
 {
     WavpackContext *wc = avctx->priv_data;
-    ThreadFrame tframe = { .f = frame };
     WavpackFrameContext *s;
     GetByteContext gb;
     void *samples_l = NULL, *samples_r = NULL;
@@ -687,7 +666,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
         /* get output buffer */
         frame->nb_samples = s->samples + 1;
-        if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
+        if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
             return ret;
         frame->nb_samples = s->samples;
     }
@@ -729,15 +708,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
 
     return ret;
-}
-
-static void wavpack_decode_flush(AVCodecContext *avctx)
-{
-    WavpackContext *s = avctx->priv_data;
-    int i;
-
-    for (i = 0; i < s->fdec_num; i++)
-        wv_reset_saved_context(s->fdec[i]);
 }
 
 static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
@@ -783,12 +753,10 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
             av_log(avctx, AV_LOG_ERROR,
                    "Block %d has invalid size (size %d vs. %d bytes left)\n",
                    s->block, frame_size, buf_size);
-            wavpack_decode_flush(avctx);
             return AVERROR_INVALIDDATA;
         }
         if ((ret = wavpack_decode_block(avctx, s->block,
                                         frame, buf, frame_size)) < 0) {
-            wavpack_decode_flush(avctx);
             return ret;
         }
         s->block++;
@@ -815,6 +783,5 @@ AVCodec ff_wavpack_dsd_decoder = {
     .init           = wavpack_decode_init,
     .close          = wavpack_decode_end,
     .decode         = wavpack_decode_frame,
-    .flush          = wavpack_decode_flush,
     .capabilities   = AV_CODEC_CAP_DR1,
 };
