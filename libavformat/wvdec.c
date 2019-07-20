@@ -253,7 +253,7 @@ static int wv_read_header(AVFormatContext *s)
     st->codecpar->codec_type            = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id              = wc->header.flags & WV_DSD ?
                                           AV_CODEC_ID_WAVPACK_DSD :
-                                          AV_CODEC_ID_WAVPACK_DSD;
+                                          AV_CODEC_ID_WAVPACK;
     st->codecpar->channels              = wc->chan;
     st->codecpar->channel_layout        = wc->chmask;
     st->codecpar->sample_rate           = wc->rate;
