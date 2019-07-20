@@ -182,7 +182,6 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
                 rate_x = 1 << avio_r8(pb);
                 if (size)
                     avio_skip(pb, size-1);
-                av_log(ctx, AV_LOG_WARNING, "got a DSD rate_x of %d\n", rate_x);
                 break;
             case 0x27:
                 rate = avio_rl24(pb);
@@ -237,7 +236,6 @@ static int wv_read_header(AVFormatContext *s)
     AVStream *st;
     int ret;
 
-    av_log(s, AV_LOG_WARNING, "wv_read_header() called\n");
     wc->block_parsed = 0;
     for (;;) {
         if ((ret = wv_read_block_header(s, pb)) < 0)
@@ -283,8 +281,6 @@ static int wv_read_packet(AVFormatContext *s, AVPacket *pkt)
     int off;
     int64_t pos;
     uint32_t block_samples;
-
-    av_log(s, AV_LOG_WARNING, "wv_read_packet() called\n");
 
     if (avio_feof(s->pb))
         return AVERROR_EOF;

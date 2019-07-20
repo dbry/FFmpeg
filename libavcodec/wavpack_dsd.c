@@ -36,10 +36,6 @@
  * WavPack lossless audio decoder
  */
 
-typedef struct {
-    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
-} DSDfilters;
-
 #define DSD_BYTE_READY(low,high) (!(((low) ^ (high)) & 0xff000000))
 
 #define PTABLE_BITS 8
@@ -417,8 +413,6 @@ static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc,
     return 0;
 }
 
-/*---------------- DSD HIGH ---------------*/
-
 static void init_ptable (int *table, int rate_i, int rate_s)
 {
     int value = 0x808000, rate = rate_i << 8, c, i;
@@ -439,17 +433,21 @@ static void init_ptable (int *table, int rate_i, int rate_s)
     }
 }
 
+typedef struct {
+    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
+} DSDfilters;
+
 static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    uint8_t *dsd_l            = dst_l;
-    uint8_t *dsd_r            = dst_r;
+    uint8_t *dsd_l                  = dst_l;
+    uint8_t *dsd_r                  = dst_r;
+    uint32_t crc                    = 0xFFFFFFFF;
+    int total_samples = s->samples, stereo = dst_r ? 1 : 0;
+    DSDfilters filters [2], *sp = filters;
     int channel, rate_i, rate_s, i;
     uint32_t low, high, value;
-    uint32_t crc = 0xFFFFFFFF;
-    DSDfilters filters [2], *sp = filters;
-    int total_samples = s->samples, stereo = (!dst_r) ? 0 : 1;
 
-    if (bytestream2_get_bytes_left(&s->dsd_gb) < (!dst_r ? 13 : 20))
+    if (bytestream2_get_bytes_left(&s->dsd_gb) < (stereo ? 20 : 13))
         return AVERROR_INVALIDDATA;
 
     rate_i = bytestream2_get_byte(&s->dsd_gb);
@@ -460,7 +458,7 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
     init_ptable (s->ptable, rate_i, rate_s);
 
-    for (channel = 0; channel < (!dst_r ? 1 : 2); ++channel) {
+    for (channel = 0; channel < stereo + 1; ++channel) {
         DSDfilters *sp = filters + channel;
 
         sp->filter1 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
@@ -480,10 +478,10 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     for (i = 4; i--;)
         value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
 
-    memset (dst_l, 0, total_samples * 4);
+    memset (dst_l, 0x69, total_samples * 4);
 
     if (stereo)
-        memset (dst_r, 0, total_samples * 4);
+        memset (dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
         int bitcount = 8;
@@ -573,25 +571,23 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
-    if (wv_check_crc(s, crc, 0))
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
         return AVERROR_INVALIDDATA;
 
     return 0;
 }
 
-/*---------------- DSD LOW ---------------*/
-
 static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    uint8_t *dsd_l            = dst_l;
-    uint8_t *dsd_r            = dst_r;
+    uint8_t *dsd_l                  = dst_l;
+    uint8_t *dsd_r                  = dst_r;
     unsigned char history_bits, max_probability;
-    int total_summed_probabilities = 0, i;
-    int total_samples = s->samples;
+    int total_summed_probabilities  = 0;
+    int total_samples               = s->samples;
     int history_bins, p0, p1, chan;
-    uint32_t crc = 0xFFFFFFFF;
+    uint32_t crc                    = 0xFFFFFFFF;
     uint32_t low, high, value;
-    int ret = 0;
+    int ret = 0, i;
 
     if (!bytestream2_get_bytes_left(&s->dsd_gb))
         return AVERROR_INVALIDDATA;
@@ -602,7 +598,6 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
         return AVERROR_INVALIDDATA;
 
     history_bins = 1 << history_bits;
-
     max_probability = bytestream2_get_byte(&s->dsd_gb);
 
     if (max_probability < 0xff) {
@@ -663,18 +658,20 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     chan = p0 = p1 = 0;
     low = 0; high = 0xffffffff;
 
-    memset (dst_l, 0, total_samples * 4);
+    memset (dst_l, 0x69, total_samples * 4);
 
     if (dst_r) {
-        memset (dst_r, 0, total_samples * 4);
+        memset (dst_r, 0x69, total_samples * 4);
         total_samples *= 2;
     }
 
     while (total_samples--) {
-        int mult, index, code, i;
+        int mult, index, code;
 
-        if (!s->summed_probabilities [p0] [255])
-            return 0;
+        if (!s->summed_probabilities [p0] [255]) {
+            ret = AVERROR_INVALIDDATA;
+            goto done;
+        }
 
         mult = (high - low) / s->summed_probabilities [p0] [255];
 
@@ -687,14 +684,18 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
             high = 0xffffffff;
             mult = high / s->summed_probabilities [p0] [255];
 
-            if (!mult)
-                return 0;
+            if (!mult) {
+                ret = AVERROR_INVALIDDATA;
+                goto done;
+            }
         }
 
         index = (value - low) / mult;
 
-        if (index >= s->summed_probabilities [p0] [255])
-            return 0;
+        if (index >= s->summed_probabilities [p0] [255]) {
+            ret = AVERROR_INVALIDDATA;
+            goto done;
+        }
 
         if (!dst_r) {
             if ((*dsd_l = code = s->value_lookup [p0] [index]))
@@ -742,28 +743,29 @@ done:
             s->value_lookup [p0] = NULL;
         }
 
-    if (wv_check_crc(s, crc, 0))
+    if (ret < 0)
+        return ret;
+
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
         ret = AVERROR_INVALIDDATA;
 
     return ret;
 }
 
-/*-------------- DSD COPY ----------------*/
-
 static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
 {
-    uint8_t *dsd_l            = dst_l;
-    uint8_t *dsd_r            = dst_r;
-    int total_samples = s->samples;
-    uint32_t crc = 0xFFFFFFFF;
+    uint8_t *dsd_l              = dst_l;
+    uint8_t *dsd_r              = dst_r;
+    int total_samples           = s->samples;
+    uint32_t crc                = 0xFFFFFFFF;
 
     if (bytestream2_get_bytes_left (&s->dsd_gb) != total_samples * (dst_r ? 2 : 1))
         return AVERROR_INVALIDDATA;
 
-    memset (dst_l, 0, total_samples * 4);
+    memset (dst_l, 0x69, total_samples * 4);
 
     if (dst_r)
-        memset (dst_r, 0, total_samples * 4);
+        memset (dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
         crc += (crc << 1) + (*dsd_l = bytestream2_get_byte(&s->dsd_gb));
@@ -775,13 +777,11 @@ static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
         }
     }
 
-    if (wv_check_crc(s, crc, 0))
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
         return AVERROR_INVALIDDATA;
 
     return 0;
 }
-
-/*----------------------------------------*/
 
 static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
                                    void *dst_l, void *dst_r, const int type)
@@ -1006,8 +1006,6 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
 
-    av_log(avctx, AV_LOG_WARNING, "wavpack_dsd_decode_init() called\n");
-
     s->avctx = avctx;
 
     s->fdec_num = 0;
@@ -1020,8 +1018,6 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 static av_cold int wavpack_decode_end(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
-
-    av_log(avctx, AV_LOG_WARNING, "wavpack_dsd_decode_end() called\n");
 
     s->fdec_num = 0;
 
@@ -1308,7 +1304,10 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             }
             rate_x = 1 << bytestream2_get_byte(&gb);
             dsd_mode = bytestream2_get_byte(&gb);
-            av_log(avctx, AV_LOG_WARNING, "got a DSD block, size = %i, mode = %d\n", size, dsd_mode);
+            if (dsd_mode && dsd_mode != 1 && dsd_mode != 3) {
+                av_log(avctx, AV_LOG_ERROR, "Invalid DSD encoding mode: %d\n", dsd_mode);
+                return AVERROR_INVALIDDATA;
+            }
             bytestream2_init(&s->dsd_gb, gb.buffer, size-2);
             bytestream2_skip(&gb, size-2);
             got_dsd      = 1;
@@ -1478,10 +1477,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
         else
             ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
-
-        if (ret < 0)
-            return ret;
-    } else {
+    }
+    else {
         if (got_dsd) {
             if (dsd_mode == 3)
                 ret = wv_unpack_dsd_high(s, samples_l, NULL);
@@ -1492,9 +1489,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
         else
             ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
-
-        if (ret < 0)
-            return ret;
 
         if (s->stereo)
             memcpy(samples_r, samples_l, bpp * s->samples);
@@ -1507,7 +1501,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
     }
 
-    return 0;
+    return ret;
 }
 
 static void wavpack_decode_flush(AVCodecContext *avctx)
