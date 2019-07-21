@@ -1124,25 +1124,8 @@ Return the value of imaginary part of frequency bin at location (@var{bin},@var{
 @end table
 
 @item win_size
-Set window size.
-
-It accepts the following values:
-@table @samp
-@item w16
-@item w32
-@item w64
-@item w128
-@item w256
-@item w512
-@item w1024
-@item w2048
-@item w4096
-@item w8192
-@item w16384
-@item w32768
-@item w65536
-@end table
-Default is @code{w4096}
+Set window size. Allowed range is from 16 to 131072.
+Default is @code{4096}
 
 @item win_func
 Set window function. Default is @code{hann}.
@@ -1414,7 +1397,7 @@ How much to use filtered signal in output. Default is 1.
 Range is between 0 and 1.
 
 @item response
-Show IR frequency response, magnitude and phase in additional video stream.
+Show IR frequency response, magnitude(magenta), phase(green) and group delay(yellow) in additional video stream.
 By default it is disabled.
 
 @item channel
@@ -14753,6 +14736,12 @@ Xmap and Ymap input video streams must be of same dimensions. Output video strea
 will have Xmap/Ymap video stream dimensions.
 Xmap and Ymap input video streams are 16bit depth, single channel.
 
+@table @option
+@item format
+Specify pixel format of output from this filter. Can be @code{color} or @code{gray}.
+Default is @code{color}.
+@end table
+
 @section removegrain
 
 The removegrain filter is a spatial denoiser for progressive video.
@@ -22363,25 +22352,9 @@ Reverse logarithmic scale.
 Default is @code{lin}.
 
 @item win_size
-Set window size.
+Set window size. Allowed range is from 16 to 65536.
 
-It accepts the following values:
-@table @samp
-@item w16
-@item w32
-@item w64
-@item w128
-@item w256
-@item w512
-@item w1024
-@item w2048
-@item w4096
-@item w8192
-@item w16384
-@item w32768
-@item w65536
-@end table
-Default is @code{w2048}
+Default is @code{2048}
 
 @item win_func
 Set windowing function.
