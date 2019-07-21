@@ -22,7 +22,6 @@
 
 #include "libavutil/channel_layout.h"
 
-#define BITSTREAM_READER_LE
 #include "avcodec.h"
 #include "bytestream.h"
 #include "internal.h"
@@ -55,7 +54,6 @@
 
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
-    int frame_flags;
     int stereo, stereo_in;
     uint32_t CRC;
     int samples;
@@ -509,7 +507,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     int got_dsd = 0;
     int id, size, ssize;
     int chan = 0, chmask = 0, sample_rate = 0, rate_x = 1, dsd_mode = 0;
-    int multiblock;
+    int frame_flags, multiblock;
 
     if (block_no >= wc->fdec_num && wv_alloc_frame_context(wc) < 0) {
         av_log(avctx, AV_LOG_ERROR, "Error creating frame decode context\n");
@@ -531,11 +529,11 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                "a sequence: %d and %d\n", wc->samples, s->samples);
         return AVERROR_INVALIDDATA;
     }
-    s->frame_flags = bytestream2_get_le32(&gb);
-    multiblock     = (s->frame_flags & WV_SINGLE_BLOCK) != WV_SINGLE_BLOCK;
+    frame_flags = bytestream2_get_le32(&gb);
+    multiblock     = (frame_flags & WV_SINGLE_BLOCK) != WV_SINGLE_BLOCK;
 
-    s->stereo         = !(s->frame_flags & WV_MONO);
-    s->stereo_in      =  (s->frame_flags & WV_FALSE_STEREO) ? 0 : s->stereo;
+    s->stereo         = !(frame_flags & WV_MONO);
+    s->stereo_in      =  (frame_flags & WV_FALSE_STEREO) ? 0 : s->stereo;
     s->CRC            = bytestream2_get_le32(&gb);
 
     // parse metadata blocks
@@ -643,7 +641,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     }
 
     if (!wc->ch_offset) {
-        int sr = (s->frame_flags >> 23) & 0xf;
+        int sr = (frame_flags >> 23) & 0xf;
         if (sr == 0xf) {
             if (!sample_rate) {
                 av_log(avctx, AV_LOG_ERROR, "Custom sample rate missing.\n");
@@ -734,14 +732,12 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
     }
 
-    if (frame_flags & (WV_FLOAT_DATA | WV_DSD_DATA)) {
-        avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
-    } else if ((frame_flags & 0x03) <= 1) {
-        avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
-    } else {
-        avctx->sample_fmt          = AV_SAMPLE_FMT_S32P;
-        avctx->bits_per_raw_sample = ((frame_flags & 0x03) + 1) << 3;
+    if (!(frame_flags & WV_DSD_DATA)) {
+        av_log(avctx, AV_LOG_ERROR, "Encountered a non-DSD frame\n");
+        return AVERROR_INVALIDDATA;
     }
+
+    avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
 
     while (buf_size > 0) {
         if (buf_size <= WV_HEADER_SIZE)
