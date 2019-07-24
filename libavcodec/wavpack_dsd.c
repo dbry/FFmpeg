@@ -58,10 +58,10 @@ typedef struct WavpackFrameContext {
     uint32_t CRC;
     int samples;
     GetByteContext gb;
-    int ptable [PTABLE_BINS];
-    int16_t summed_probabilities [MAX_HISTORY_BINS] [256];
-    unsigned char probabilities [MAX_HISTORY_BINS] [256];
-    unsigned char *value_lookup [MAX_HISTORY_BINS];
+    int ptable[PTABLE_BINS];
+    int16_t summed_probabilities[MAX_HISTORY_BINS][256];
+    uint8_t probabilities[MAX_HISTORY_BINS][256];
+    uint8_t *value_lookup[MAX_HISTORY_BINS];
     DSDContext dsdctx[2];
 } WavpackFrameContext;
 
@@ -88,21 +88,21 @@ static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc)
     return 0;
 }
 
-static void init_ptable (int *table, int rate_i, int rate_s)
+static void init_ptable(int *table, int rate_i, int rate_s)
 {
-    int value = 0x808000, rate = rate_i << 8, c, i;
+    int value = 0x808000, rate = rate_i << 8;
 
-    for (c = (rate + 128) >> 8; c--;)
+    for (int c = (rate + 128) >> 8; c--;)
         value += (DOWN - value) >> DECAY;
 
-    for (i = 0; i < PTABLE_BINS/2; ++i) {
-        table [i] = value;
-        table [PTABLE_BINS-1-i] = 0x100ffff - value;
+    for (int i = 0; i < PTABLE_BINS/2; i++) {
+        table[i] = value;
+        table[PTABLE_BINS-1-i] = 0x100ffff - value;
 
         if (value > 0x010000) {
             rate += (rate * rate_s + 128) >> 8;
 
-            for (c = (rate + 64) >> 7; c--;)
+            for (int c = (rate + 64) >> 7; c--;)
                 value += (DOWN - value) >> DECAY;
         }
     }
@@ -112,14 +112,12 @@ typedef struct {
     int32_t value, fltr0, fltr1, fltr2, fltr3, fltr4, fltr5, fltr6, factor, byte;
 } DSDfilters;
 
-static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
+static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
 {
-    uint8_t *dsd_l                  = dst_l;
-    uint8_t *dsd_r                  = dst_r;
     uint32_t crc                    = 0xFFFFFFFF;
     int total_samples = s->samples, stereo = dst_r ? 1 : 0;
-    DSDfilters filters [2], *sp = filters;
-    int channel, rate_i, rate_s, i;
+    DSDfilters filters[2], *sp = filters;
+    int rate_i, rate_s;
     uint32_t low, high, value;
 
     if (bytestream2_get_bytes_left(&s->gb) < (stereo ? 20 : 13))
@@ -131,9 +129,9 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     if (rate_s != RATE_S)
         return AVERROR_INVALIDDATA;
 
-    init_ptable (s->ptable, rate_i, rate_s);
+    init_ptable(s->ptable, rate_i, rate_s);
 
-    for (channel = 0; channel < stereo + 1; ++channel) {
+    for (int channel = 0; channel < stereo + 1; channel++) {
         DSDfilters *sp = filters + channel;
 
         sp->fltr1 = bytestream2_get_byte(&s->gb) << (PRECISION - 8);
@@ -150,101 +148,99 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     high = 0xffffffff;
     low = 0x0;
 
-    for (i = 4; i--;)
+    for (int i = 4; i--;)
         value = (value << 8) | bytestream2_get_byte(&s->gb);
 
-    memset (dst_l, 0x69, total_samples * 4);
+    memset(dst_l, 0x69, total_samples * 4);
 
     if (stereo)
-        memset (dst_r, 0x69, total_samples * 4);
+        memset(dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
         int bitcount = 8;
 
-        sp [0].value = sp [0].fltr1 - sp [0].fltr5 + ((sp [0].fltr6 * sp [0].factor) >> 2);
+        sp[0].value = sp[0].fltr1 - sp[0].fltr5 + ((sp[0].fltr6 * sp[0].factor) >> 2);
 
         if (stereo)
-            sp [1].value = sp [1].fltr1 - sp [1].fltr5 + ((sp [1].fltr6 * sp [1].factor) >> 2);
+            sp[1].value = sp[1].fltr1 - sp[1].fltr5 + ((sp[1].fltr6 * sp[1].factor) >> 2);
 
         while (bitcount--) {
-            int32_t *pp = s->ptable + ((sp [0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            int32_t *pp = s->ptable + ((sp[0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
             uint32_t split = low + ((high - low) >> 8) * (*pp >> 16);
 
             if (value <= split) {
                 high = split;
                 *pp += (UP - *pp) >> DECAY;
-                sp [0].fltr0 = -1;
-            }
-            else {
+                sp[0].fltr0 = -1;
+            } else {
                 low = split + 1;
                 *pp += (DOWN - *pp) >> DECAY;
-                sp [0].fltr0 = 0;
+                sp[0].fltr0 = 0;
             }
 
-            while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->gb)) {
+            while (DSD_BYTE_READY(high, low) && bytestream2_get_bytes_left(&s->gb)) {
                 value = (value << 8) | bytestream2_get_byte(&s->gb);
                 high = (high << 8) | 0xff;
                 low <<= 8;
             }
 
-            sp [0].value += sp [0].fltr6 << 3;
-            sp [0].byte = (sp [0].byte << 1) | (sp [0].fltr0 & 1);
-            sp [0].factor += (((sp [0].value ^ sp [0].fltr0) >> 31) | 1) &
-                ((sp [0].value ^ (sp [0].value - (sp [0].fltr6 << 4))) >> 31);
-            sp [0].fltr1 += ((sp [0].fltr0 & VALUE_ONE) - sp [0].fltr1) >> 6;
-            sp [0].fltr2 += ((sp [0].fltr0 & VALUE_ONE) - sp [0].fltr2) >> 4;
-            sp [0].fltr3 += (sp [0].fltr2 - sp [0].fltr3) >> 4;
-            sp [0].fltr4 += (sp [0].fltr3 - sp [0].fltr4) >> 4;
-            sp [0].value = (sp [0].fltr4 - sp [0].fltr5) >> 4;
-            sp [0].fltr5 += sp [0].value;
-            sp [0].fltr6 += (sp [0].value - sp [0].fltr6) >> 3;
-            sp [0].value = sp [0].fltr1 - sp [0].fltr5 + ((sp [0].fltr6 * sp [0].factor) >> 2);
+            sp[0].value += sp[0].fltr6 << 3;
+            sp[0].byte = (sp[0].byte << 1) | (sp[0].fltr0 & 1);
+            sp[0].factor += (((sp[0].value ^ sp[0].fltr0) >> 31) | 1) &
+                ((sp[0].value ^ (sp[0].value - (sp[0].fltr6 << 4))) >> 31);
+            sp[0].fltr1 += ((sp[0].fltr0 & VALUE_ONE) - sp[0].fltr1) >> 6;
+            sp[0].fltr2 += ((sp[0].fltr0 & VALUE_ONE) - sp[0].fltr2) >> 4;
+            sp[0].fltr3 += (sp[0].fltr2 - sp[0].fltr3) >> 4;
+            sp[0].fltr4 += (sp[0].fltr3 - sp[0].fltr4) >> 4;
+            sp[0].value = (sp[0].fltr4 - sp[0].fltr5) >> 4;
+            sp[0].fltr5 += sp[0].value;
+            sp[0].fltr6 += (sp[0].value - sp[0].fltr6) >> 3;
+            sp[0].value = sp[0].fltr1 - sp[0].fltr5 + ((sp[0].fltr6 * sp[0].factor) >> 2);
 
             if (!stereo)
                 continue;
 
-            pp = s->ptable + ((sp [1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            pp = s->ptable + ((sp[1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
             split = low + ((high - low) >> 8) * (*pp >> 16);
 
             if (value <= split) {
                 high = split;
                 *pp += (UP - *pp) >> DECAY;
-                sp [1].fltr0 = -1;
-            }
-            else {
+                sp[1].fltr0 = -1;
+            } else {
                 low = split + 1;
                 *pp += (DOWN - *pp) >> DECAY;
-                sp [1].fltr0 = 0;
+                sp[1].fltr0 = 0;
             }
 
-            while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->gb)) {
+            while (DSD_BYTE_READY(high, low) && bytestream2_get_bytes_left(&s->gb)) {
                 value = (value << 8) | bytestream2_get_byte(&s->gb);
                 high = (high << 8) | 0xff;
                 low <<= 8;
             }
 
-            sp [1].value += sp [1].fltr6 << 3;
-            sp [1].byte = (sp [1].byte << 1) | (sp [1].fltr0 & 1);
-            sp [1].factor += (((sp [1].value ^ sp [1].fltr0) >> 31) | 1) &
-                ((sp [1].value ^ (sp [1].value - (sp [1].fltr6 << 4))) >> 31);
-            sp [1].fltr1 += ((sp [1].fltr0 & VALUE_ONE) - sp [1].fltr1) >> 6;
-            sp [1].fltr2 += ((sp [1].fltr0 & VALUE_ONE) - sp [1].fltr2) >> 4;
-            sp [1].fltr3 += (sp [1].fltr2 - sp [1].fltr3) >> 4;
-            sp [1].fltr4 += (sp [1].fltr3 - sp [1].fltr4) >> 4;
-            sp [1].value = (sp [1].fltr4 - sp [1].fltr5) >> 4;
-            sp [1].fltr5 += sp [1].value;
-            sp [1].fltr6 += (sp [1].value - sp [1].fltr6) >> 3;
-            sp [1].value = sp [1].fltr1 - sp [1].fltr5 + ((sp [1].fltr6 * sp [1].factor) >> 2);
+            sp[1].value += sp[1].fltr6 << 3;
+            sp[1].byte = (sp[1].byte << 1) | (sp[1].fltr0 & 1);
+            sp[1].factor += (((sp[1].value ^ sp[1].fltr0) >> 31) | 1) &
+                ((sp[1].value ^ (sp[1].value - (sp[1].fltr6 << 4))) >> 31);
+            sp[1].fltr1 += ((sp[1].fltr0 & VALUE_ONE) - sp[1].fltr1) >> 6;
+            sp[1].fltr2 += ((sp[1].fltr0 & VALUE_ONE) - sp[1].fltr2) >> 4;
+            sp[1].fltr3 += (sp[1].fltr2 - sp[1].fltr3) >> 4;
+            sp[1].fltr4 += (sp[1].fltr3 - sp[1].fltr4) >> 4;
+            sp[1].value = (sp[1].fltr4 - sp[1].fltr5) >> 4;
+            sp[1].fltr5 += sp[1].value;
+            sp[1].fltr6 += (sp[1].value - sp[1].fltr6) >> 3;
+            sp[1].value = sp[1].fltr1 - sp[1].fltr5 + ((sp[1].fltr6 * sp[1].factor) >> 2);
         }
 
-        crc += (crc << 1) + (*dsd_l = sp [0].byte & 0xff);
-        sp [0].factor -= (sp [0].factor + 512) >> 10;
-        dsd_l += 4;
+        crc += (crc << 1) + (*dst_l = sp[0].byte & 0xff);
+        sp[0].factor -= (sp[0].factor + 512) >> 10;
+        dst_l += 4;
 
         if (stereo) {
-            crc += (crc << 1) + (*dsd_r = filters [1].byte & 0xff);
-            filters [1].factor -= (filters [1].factor + 512) >> 10;
-            dsd_r += 4;
+            crc += (crc << 1) + (*dst_r = filters[1].byte & 0xff);
+            filters[1].factor -= (filters[1].factor + 512) >> 10;
+            dst_r += 4;
         }
     }
 
@@ -254,11 +250,9 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
     return 0;
 }
 
-static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
+static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
 {
-    uint8_t *dsd_l                  = dst_l;
-    uint8_t *dsd_r                  = dst_r;
-    unsigned char history_bits, max_probability;
+    uint8_t history_bits, max_probability;
     int total_summed_probabilities  = 0;
     int total_samples               = s->samples;
     int history_bins, p0, p1, chan;
@@ -278,8 +272,8 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     max_probability = bytestream2_get_byte(&s->gb);
 
     if (max_probability < 0xff) {
-        unsigned char *outptr = (unsigned char *) s->probabilities;
-        unsigned char *outend = outptr + sizeof (*s->probabilities) * history_bins;
+        uint8_t *outptr = (uint8_t *) s->probabilities;
+        uint8_t *outend = outptr + sizeof (*s->probabilities) * history_bins;
 
         while (outptr < outend && bytestream2_get_bytes_left(&s->gb)) {
             int code = bytestream2_get_byte(&s->gb);
@@ -289,36 +283,37 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
                 while (outptr < outend && zcount--)
                     *outptr++ = 0;
-            }
-            else if (code)
+            } else if (code) {
                 *outptr++ = code;
-            else
+            }
+            else {
                 break;
+            }
         }
 
         if (outptr < outend ||
             (bytestream2_get_bytes_left(&s->gb) && bytestream2_get_byte(&s->gb)))
                 return AVERROR_INVALIDDATA;
-    }
-    else if (bytestream2_get_bytes_left(&s->gb) > (int) sizeof (*s->probabilities) * history_bins)
+    } else if (bytestream2_get_bytes_left(&s->gb) > (int) sizeof (*s->probabilities) * history_bins) {
         bytestream2_get_buffer(&s->gb, (uint8_t *) s->probabilities,
             sizeof (*s->probabilities) * history_bins);
-    else
+    } else {
         return AVERROR_INVALIDDATA;
+    }
 
-    for (p0 = 0; p0 < history_bins; ++p0) {
+    for (p0 = 0; p0 < history_bins; p0++) {
         int32_t sum_values;
-        unsigned char *vp;
+        uint8_t *vp;
 
-        for (sum_values = i = 0; i < 256; ++i)
-            s->summed_probabilities [p0] [i] = sum_values += s->probabilities [p0] [i];
+        for (sum_values = i = 0; i < 256; i++)
+            s->summed_probabilities[p0][i] = sum_values += s->probabilities[p0][i];
 
         if (sum_values) {
             total_summed_probabilities += sum_values;
-            vp = s->value_lookup [p0] = av_malloc (sum_values);
+            vp = s->value_lookup[p0] = av_malloc(sum_values);
 
             for (i = 0; i < 256; i++) {
-                int c = s->probabilities [p0] [i];
+                int c = s->probabilities[p0][i];
 
                 while (c--)
                     *vp++ = i;
@@ -332,28 +327,28 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
             goto done;
     }
 
-    for (i = 4; i--;)
+    for (int i = 4; i--;)
         value = (value << 8) | bytestream2_get_byte(&s->gb);
 
     chan = p0 = p1 = 0;
     low = 0; high = 0xffffffff;
 
-    memset (dst_l, 0x69, total_samples * 4);
+    memset(dst_l, 0x69, total_samples * 4);
 
     if (dst_r) {
-        memset (dst_r, 0x69, total_samples * 4);
+        memset(dst_r, 0x69, total_samples * 4);
         total_samples *= 2;
     }
 
     while (total_samples--) {
         int mult, index, code;
 
-        if (!s->summed_probabilities [p0] [255]) {
+        if (!s->summed_probabilities[p0][255]) {
             ret = AVERROR_INVALIDDATA;
             goto done;
         }
 
-        mult = (high - low) / s->summed_probabilities [p0] [255];
+        mult = (high - low) / s->summed_probabilities[p0][255];
 
         if (!mult) {
             if (bytestream2_get_bytes_left(&s->gb) >= 4)
@@ -362,7 +357,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
             low = 0;
             high = 0xffffffff;
-            mult = high / s->summed_probabilities [p0] [255];
+            mult = high / s->summed_probabilities[p0][255];
 
             if (!mult) {
                 ret = AVERROR_INVALIDDATA;
@@ -372,44 +367,43 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
 
         index = (value - low) / mult;
 
-        if (index >= s->summed_probabilities [p0] [255]) {
+        if (index >= s->summed_probabilities[p0][255]) {
             ret = AVERROR_INVALIDDATA;
             goto done;
         }
 
         if (!dst_r) {
-            if ((*dsd_l = code = s->value_lookup [p0] [index]))
-                low += s->summed_probabilities [p0] [code-1] * mult;
+            if ((*dst_l = code = s->value_lookup[p0][index]))
+                low += s->summed_probabilities[p0][code-1] * mult;
 
-            dsd_l += 4;
-        }
-        else {
-            if ((code = s->value_lookup [p0] [index]))
-                low += s->summed_probabilities [p0] [code-1] * mult;
+            dst_l += 4;
+        } else {
+            if ((code = s->value_lookup[p0][index]))
+                low += s->summed_probabilities[p0][code-1] * mult;
 
             if (chan) {
-                *dsd_r = code;
-                dsd_r += 4;
+                *dst_r = code;
+                dst_r += 4;
             }
             else {
-                *dsd_l = code;
-                dsd_l += 4;
+                *dst_l = code;
+                dst_l += 4;
             }
 
             chan ^= 1;
         }
 
-        high = low + s->probabilities [p0] [code] * mult - 1;
+        high = low + s->probabilities[p0][code] * mult - 1;
         crc += (crc << 1) + code;
 
-        if (!dst_r)
+        if (!dst_r) {
             p0 = code & (history_bins-1);
-        else {
+        } else {
             p0 = p1;
             p1 = code & (history_bins-1);
         }
 
-        while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->gb)) {
+        while (DSD_BYTE_READY(high, low) && bytestream2_get_bytes_left(&s->gb)) {
             value = (value << 8) | bytestream2_get_byte(&s->gb);
             high = (high << 8) | 0xff;
             low <<= 8;
@@ -417,10 +411,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
     }
 
 done:
-    for (p0 = 0; p0 < history_bins; ++p0)
-        if (s->value_lookup [p0]) {
-            av_free (s->value_lookup [p0]);
-            s->value_lookup [p0] = NULL;
+    for (p0 = 0; p0 < history_bins; p0++)
+        if (s->value_lookup[p0]) {
+            av_free(s->value_lookup[p0]);
+            s->value_lookup[p0] = NULL;
         }
 
     if (ret < 0)
@@ -432,28 +426,26 @@ done:
     return ret;
 }
 
-static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
+static int wv_unpack_dsd_copy(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
 {
-    uint8_t *dsd_l              = dst_l;
-    uint8_t *dsd_r              = dst_r;
     int total_samples           = s->samples;
     uint32_t crc                = 0xFFFFFFFF;
 
-    if (bytestream2_get_bytes_left (&s->gb) != total_samples * (dst_r ? 2 : 1))
+    if (bytestream2_get_bytes_left(&s->gb) != total_samples * (dst_r ? 2 : 1))
         return AVERROR_INVALIDDATA;
 
-    memset (dst_l, 0x69, total_samples * 4);
+    memset(dst_l, 0x69, total_samples * 4);
 
     if (dst_r)
-        memset (dst_r, 0x69, total_samples * 4);
+        memset(dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
-        crc += (crc << 1) + (*dsd_l = bytestream2_get_byte(&s->gb));
-        dsd_l += 4;
+        crc += (crc << 1) + (*dst_l = bytestream2_get_byte(&s->gb));
+        dst_l += 4;
 
         if (dst_r) {
-            crc += (crc << 1) + (*dsd_r = bytestream2_get_byte(&s->gb));
-            dsd_r += 4;
+            crc += (crc << 1) + (*dst_r = bytestream2_get_byte(&s->gb));
+            dst_r += 4;
         }
     }
 
@@ -656,8 +648,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 return AVERROR_INVALIDDATA;
             }
             avctx->sample_rate = sample_rate * rate_x;
-        } else
+        } else {
             avctx->sample_rate = wv_rates[sr] * rate_x;
+        }
 
         if (multiblock) {
             if (chan)
@@ -696,8 +689,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             ret = wv_unpack_dsd_fast(s, samples_l, samples_r);
         else
             ret = wv_unpack_dsd_copy(s, samples_l, samples_r);
-    }
-    else {
+    } else {
         if (dsd_mode == 3)
             ret = wv_unpack_dsd_high(s, samples_l, NULL);
         else if (dsd_mode == 1)
@@ -709,10 +701,10 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             memcpy(samples_r, samples_l, 4 * s->samples);
     }
 
-    ff_dsd2pcm_translate (&s->dsdctx [0], s->samples, 0, samples_l, 4, samples_l, 1);
+    ff_dsd2pcm_translate(&s->dsdctx[0], s->samples, 0, samples_l, 4, samples_l, 1);
 
     if (s->stereo)
-        ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
+        ff_dsd2pcm_translate(&s->dsdctx[1], s->samples, 0, samples_r, 4, samples_r, 1);
 
     return ret;
 }
