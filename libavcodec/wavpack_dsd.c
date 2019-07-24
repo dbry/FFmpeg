@@ -51,6 +51,7 @@
 
 #define MAX_HISTORY_BITS    5
 #define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
+#define MAX_BIN_BYTES       1280    // for value_lookup, per bin (2k - 512 - 256)
 
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
@@ -59,6 +60,7 @@ typedef struct WavpackFrameContext {
     int samples;
     GetByteContext gb;
     int ptable[PTABLE_BINS];
+    uint8_t value_lookup_buffer[MAX_HISTORY_BINS*MAX_BIN_BYTES];
     int16_t summed_probabilities[MAX_HISTORY_BINS][256];
     uint8_t probabilities[MAX_HISTORY_BINS][256];
     uint8_t *value_lookup[MAX_HISTORY_BINS];
@@ -145,11 +147,9 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         sp->factor = (sp->factor << 16) >> 16;
     }
 
+    value = bytestream2_get_be32(&s->gb);
     high = 0xffffffff;
     low = 0x0;
-
-    for (int i = 4; i--;)
-        value = (value << 8) | bytestream2_get_byte(&s->gb);
 
     memset(dst_l, 0x69, total_samples * 4);
 
@@ -255,10 +255,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     uint8_t history_bits, max_probability;
     int total_summed_probabilities  = 0;
     int total_samples               = s->samples;
+    uint8_t *vlb                    = s->value_lookup_buffer;
     int history_bins, p0, p1, chan;
     uint32_t crc                    = 0xFFFFFFFF;
     uint32_t low, high, value;
-    int ret = 0, i;
 
     if (!bytestream2_get_bytes_left(&s->gb))
         return AVERROR_INVALIDDATA;
@@ -302,36 +302,34 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     }
 
     for (p0 = 0; p0 < history_bins; p0++) {
-        int32_t sum_values;
-        uint8_t *vp;
+        int32_t sum_values = 0;
 
-        for (sum_values = i = 0; i < 256; i++)
+        for (int i = 0; i < 256; i++)
             s->summed_probabilities[p0][i] = sum_values += s->probabilities[p0][i];
 
         if (sum_values) {
             total_summed_probabilities += sum_values;
-            vp = s->value_lookup[p0] = av_malloc(sum_values);
 
-            for (i = 0; i < 256; i++) {
+            if (total_summed_probabilities > history_bins * MAX_BIN_BYTES)
+                return AVERROR_INVALIDDATA;
+
+            s->value_lookup[p0] = vlb;
+
+            for (int i = 0; i < 256; i++) {
                 int c = s->probabilities[p0][i];
 
                 while (c--)
-                    *vp++ = i;
+                    *vlb++ = i;
             }
         }
     }
 
-    if (bytestream2_get_bytes_left(&s->gb) < 4 ||
-        total_summed_probabilities > history_bins * 1280) {
-            ret = AVERROR_INVALIDDATA;
-            goto done;
-    }
-
-    for (int i = 4; i--;)
-        value = (value << 8) | bytestream2_get_byte(&s->gb);
+    if (bytestream2_get_bytes_left(&s->gb) < 4)
+        return AVERROR_INVALIDDATA;
 
     chan = p0 = p1 = 0;
     low = 0; high = 0xffffffff;
+    value = bytestream2_get_be32(&s->gb);
 
     memset(dst_l, 0x69, total_samples * 4);
 
@@ -343,34 +341,27 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     while (total_samples--) {
         int mult, index, code;
 
-        if (!s->summed_probabilities[p0][255]) {
-            ret = AVERROR_INVALIDDATA;
-            goto done;
-        }
+        if (!s->summed_probabilities[p0][255])
+            return AVERROR_INVALIDDATA;
 
         mult = (high - low) / s->summed_probabilities[p0][255];
 
         if (!mult) {
             if (bytestream2_get_bytes_left(&s->gb) >= 4)
-                for (i = 4; i--;)
-                    value = (value << 8) | bytestream2_get_byte(&s->gb);
+                value = bytestream2_get_be32(&s->gb);
 
             low = 0;
             high = 0xffffffff;
             mult = high / s->summed_probabilities[p0][255];
 
-            if (!mult) {
-                ret = AVERROR_INVALIDDATA;
-                goto done;
-            }
+            if (!mult)
+                return AVERROR_INVALIDDATA;
         }
 
         index = (value - low) / mult;
 
-        if (index >= s->summed_probabilities[p0][255]) {
-            ret = AVERROR_INVALIDDATA;
-            goto done;
-        }
+        if (index >= s->summed_probabilities[p0][255])
+            return AVERROR_INVALIDDATA;
 
         if (!dst_r) {
             if ((*dst_l = code = s->value_lookup[p0][index]))
@@ -410,20 +401,10 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         }
     }
 
-done:
-    for (p0 = 0; p0 < history_bins; p0++)
-        if (s->value_lookup[p0]) {
-            av_free(s->value_lookup[p0]);
-            s->value_lookup[p0] = NULL;
-        }
-
-    if (ret < 0)
-        return ret;
-
     if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc))
-        ret = AVERROR_INVALIDDATA;
+        return AVERROR_INVALIDDATA;
 
-    return ret;
+    return 0;
 }
 
 static int wv_unpack_dsd_copy(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
