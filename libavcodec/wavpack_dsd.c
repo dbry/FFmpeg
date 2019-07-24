@@ -539,10 +539,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     while (bytestream2_get_bytes_left(&gb)) {
         id   = bytestream2_get_byte(&gb);
         size = bytestream2_get_byte(&gb);
-        if (id & WP_IDF_LONG) {
-            size |= (bytestream2_get_byte(&gb)) << 8;
-            size |= (bytestream2_get_byte(&gb)) << 16;
-        }
+        if (id & WP_IDF_LONG)
+            size |= (bytestream2_get_le16u(&gb)) << 8;
         size <<= 1; // size is specified in words
         ssize  = size;
         if (id & WP_IDF_ODD)
@@ -709,6 +707,16 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     return ret;
 }
 
+static void wavpack_decode_flush(AVCodecContext *avctx)
+{
+    WavpackContext *s = avctx->priv_data;
+
+    for (int i = 0; i < s->fdec_num; i++) {
+        memset(s->fdec[i]->dsdctx[0].buf, 0x69, sizeof(s->fdec[i]->dsdctx[0].buf));
+        memset(s->fdec[i]->dsdctx[1].buf, 0x69, sizeof(s->fdec[i]->dsdctx[1].buf));
+    }
+}
+
 static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
                                 int *got_frame_ptr, AVPacket *avpkt)
 {
@@ -780,5 +788,6 @@ AVCodec ff_wavpack_dsd_decoder = {
     .init           = wavpack_decode_init,
     .close          = wavpack_decode_end,
     .decode         = wavpack_decode_frame,
+    .flush          = wavpack_decode_flush,
     .capabilities   = AV_CODEC_CAP_DR1,
 };
