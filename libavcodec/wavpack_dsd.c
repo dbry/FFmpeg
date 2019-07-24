@@ -486,8 +486,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     int ret;
     int got_dsd = 0;
     int id, size, ssize;
-    int chan = 0, chmask = 0, sample_rate = 0, rate_x = 1, dsd_mode = 0;
+    int chan = 0, sample_rate = 0, rate_x = 1, dsd_mode = 0;
     int frame_flags, multiblock;
+    uint64_t chmask = 0;
 
     if (block_no >= wc->fdec_num && wv_alloc_frame_context(wc) < 0) {
         av_log(avctx, AV_LOG_ERROR, "Error creating frame decode context\n");
