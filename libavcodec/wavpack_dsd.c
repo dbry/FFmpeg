@@ -471,6 +471,8 @@ static av_cold int wavpack_decode_end(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
 
+    for (int i = 0; i < s->fdec_num; i++)
+        av_freep(&s->fdec[i]);
     s->fdec_num = 0;
 
     return 0;
