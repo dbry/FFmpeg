@@ -108,6 +108,7 @@ typedef struct PerThreadContext {
 
     int hwaccel_serializing;
     int async_serializing;
+    int dont_wait_finished;
 
     atomic_int debug_threads;       ///< Set if the FF_DEBUG_THREADS option is set.
 } PerThreadContext;
@@ -646,7 +647,7 @@ void ff_thread_await_prev_finished(AVCodecContext *avctx)
     current_thread = p - fctx->threads;
 
     pthread_mutex_lock(&p->progress_mutex);
-    if (atomic_load (&fctx->next_finished) != current_thread)
+    if (!p->dont_wait_finished && fctx->next_finished != current_thread)
         pthread_cond_wait(&p->finished_cond, &p->progress_mutex);
     pthread_mutex_unlock(&p->progress_mutex);
 }
@@ -663,10 +664,10 @@ static void park_frame_worker_threads(FrameThreadContext *fctx, int thread_count
 
         if (atomic_load(&p->state) != STATE_INPUT_READY) {
             pthread_mutex_lock(&p->progress_mutex);
-            while (atomic_load(&p->state) != STATE_INPUT_READY) {
-                pthread_cond_signal(&p->finished_cond);
+            pthread_cond_signal(&p->finished_cond);
+            p->dont_wait_finished = 1;
+            while (atomic_load(&p->state) != STATE_INPUT_READY)
                 pthread_cond_wait(&p->output_cond, &p->progress_mutex);
-            }
             pthread_mutex_unlock(&p->progress_mutex);
         }
         p->got_frame = 0;
