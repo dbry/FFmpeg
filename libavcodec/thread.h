@@ -97,6 +97,16 @@ void ff_thread_report_progress(ThreadFrame *f, int progress, int field);
 void ff_thread_await_progress(ThreadFrame *f, int progress, int field);
 
 /**
+ * Wait for all earlier decoding threads to finish. Call this before
+ * starting decode operations that must be serialized (e.g., the DSD
+ * to PCM operation for DST decoding). Operations performed before
+ * calling this function will be parallelized.
+ *
+ * @param avctx The current context.
+ */
+void ff_thread_await_prev_finished(AVCodecContext *avctx);
+
+/**
  * Wrapper around get_format() for frame-multithreaded codecs.
  * Call this function instead of avctx->get_format().
  * Cannot be called after the codec has called ff_thread_finish_setup().

@@ -30,6 +30,7 @@
 #include "internal.h"
 #include "get_bits.h"
 #include "avcodec.h"
+#include "thread.h"
 #include "golomb.h"
 #include "mathops.h"
 #include "dsd.h"
@@ -73,7 +74,7 @@ typedef struct DSTContext {
     Table fsets, probs;
     DECLARE_ALIGNED(16, uint8_t, status)[DST_MAX_CHANNELS][16];
     DECLARE_ALIGNED(16, int16_t, filter)[DST_MAX_ELEMENTS][16][256];
-    DSDContext dsdctx[DST_MAX_CHANNELS];
+    DSDContext *dsdctx;
 } DSTContext;
 
 static av_cold int decode_init(AVCodecContext *avctx)
@@ -88,10 +89,24 @@ static av_cold int decode_init(AVCodecContext *avctx)
 
     avctx->sample_fmt = AV_SAMPLE_FMT_FLT;
 
+    // the DSD to PCM context is shared (and used serially) between all decoding threads
+
+    s->dsdctx = av_calloc(DST_MAX_CHANNELS, sizeof (DSDContext));
+
     for (i = 0; i < avctx->channels; i++)
         memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
 
     ff_init_dsd_data();
+
+    return 0;
+}
+
+static av_cold int decode_end(AVCodecContext *avctx)
+{
+    DSTContext *s = avctx->priv_data;
+
+    if (!avctx->internal->is_copy)
+        av_free(s->dsdctx);
 
     return 0;
 }
@@ -242,6 +257,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     GetBitContext *gb = &s->gb;
     ArithCoder *ac = &s->ac;
     AVFrame *frame = data;
+    ThreadFrame tframe = { .f = frame };
     uint8_t *dsd;
     float *pcm;
     int ret;
@@ -250,7 +266,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
 
     frame->nb_samples = samples_per_frame / 8;
-    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+    if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
         return ret;
     dsd = frame->data[0];
     pcm = (float *)frame->data[0];
@@ -351,7 +367,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
                 prob = 128;
             }
 
-            if (ac->overread > 16)
+            if (ac->overread > 21)
                 return AVERROR_INVALIDDATA;
 
             ac_get(ac, gb, prob, &residual);
@@ -364,6 +380,8 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     }
 
 dsd:
+    ff_thread_await_prev_finished(avctx);
+
     for (i = 0; i < avctx->channels; i++) {
         ff_dsd2pcm_translate(&s->dsdctx[i], frame->nb_samples, 0,
                              frame->data[0] + i * 4,
@@ -382,8 +400,9 @@ AVCodec ff_dst_decoder = {
     .id             = AV_CODEC_ID_DST,
     .priv_data_size = sizeof(DSTContext),
     .init           = decode_init,
+    .close          = decode_end,
     .decode         = decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
     .sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLT,
                                                       AV_SAMPLE_FMT_NONE },
 };

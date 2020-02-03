@@ -75,6 +75,7 @@ typedef struct PerThreadContext {
     pthread_cond_t input_cond;      ///< Used to wait for a new packet from the main thread.
     pthread_cond_t progress_cond;   ///< Used by child threads to wait for progress to change.
     pthread_cond_t output_cond;     ///< Used by the main thread to wait for frames to finish.
+    pthread_cond_t finished_cond;   ///< Used by child threads to wait to be the next finished
 
     pthread_mutex_t mutex;          ///< Mutex used to protect the contents of the PerThreadContext.
     pthread_mutex_t progress_mutex; ///< Mutex used to protect frame progress values and progress_cond.
@@ -544,7 +545,11 @@ int ff_thread_decode_frame(AVCodecContext *avctx,
 
     if (fctx->next_decoding >= avctx->thread_count) fctx->next_decoding = 0;
 
+    p = &fctx->threads[finished];
+    pthread_mutex_lock(&p->progress_mutex);
     fctx->next_finished = finished;
+    pthread_cond_signal(&p->finished_cond);
+    pthread_mutex_unlock(&p->progress_mutex);
 
     /* return the size of the consumed packet if no error occurred */
     if (err >= 0)
@@ -627,6 +632,25 @@ void ff_thread_finish_setup(AVCodecContext *avctx) {
     pthread_mutex_unlock(&p->progress_mutex);
 }
 
+void ff_thread_await_prev_finished(AVCodecContext *avctx)
+{
+    FrameThreadContext *fctx;
+    PerThreadContext *p;
+    int current_thread;
+
+    if (!avctx || !(avctx->active_thread_type & FF_THREAD_FRAME) || !avctx->internal)
+        return;
+
+    p = avctx->internal->thread_ctx;
+    fctx = p->parent;
+    current_thread = p - fctx->threads;
+
+    pthread_mutex_lock(&p->progress_mutex);
+    if (atomic_load (&fctx->next_finished) != current_thread)
+        pthread_cond_wait(&p->finished_cond, &p->progress_mutex);
+    pthread_mutex_unlock(&p->progress_mutex);
+}
+
 /// Waits for all threads to finish.
 static void park_frame_worker_threads(FrameThreadContext *fctx, int thread_count)
 {
@@ -639,8 +663,10 @@ static void park_frame_worker_threads(FrameThreadContext *fctx, int thread_count
 
         if (atomic_load(&p->state) != STATE_INPUT_READY) {
             pthread_mutex_lock(&p->progress_mutex);
-            while (atomic_load(&p->state) != STATE_INPUT_READY)
+            while (atomic_load(&p->state) != STATE_INPUT_READY) {
+                pthread_cond_signal(&p->finished_cond);
                 pthread_cond_wait(&p->output_cond, &p->progress_mutex);
+            }
             pthread_mutex_unlock(&p->progress_mutex);
         }
         p->got_frame = 0;
@@ -691,6 +717,7 @@ void ff_frame_thread_free(AVCodecContext *avctx, int thread_count)
         pthread_cond_destroy(&p->input_cond);
         pthread_cond_destroy(&p->progress_cond);
         pthread_cond_destroy(&p->output_cond);
+        pthread_cond_destroy(&p->finished_cond);
         av_packet_unref(&p->avpkt);
         av_freep(&p->released_buffers);
 
@@ -773,6 +800,7 @@ int ff_frame_thread_init(AVCodecContext *avctx)
         pthread_cond_init(&p->input_cond, NULL);
         pthread_cond_init(&p->progress_cond, NULL);
         pthread_cond_init(&p->output_cond, NULL);
+        pthread_cond_init(&p->finished_cond, NULL);
 
         p->frame = av_frame_alloc();
         if (!p->frame) {
