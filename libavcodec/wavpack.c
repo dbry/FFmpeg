@@ -26,14 +26,33 @@
 #include "bytestream.h"
 #include "get_bits.h"
 #include "internal.h"
-#include "thread.h"
 #include "unary.h"
 #include "wavpack.h"
+#include "dsd.h"
 
 /**
  * @file
  * WavPack lossless audio decoder
  */
+
+#define DSD_BYTE_READY(low,high) (!(((low) ^ (high)) & 0xff000000))
+
+#define PTABLE_BITS 8
+#define PTABLE_BINS (1<<PTABLE_BITS)
+#define PTABLE_MASK (PTABLE_BINS-1)
+
+#define UP   0x010000fe
+#define DOWN 0x00010000
+#define DECAY 8
+
+#define PRECISION 20
+#define VALUE_ONE (1 << PRECISION)
+#define PRECISION_USE 12
+
+#define RATE_S 20
+
+#define MAX_HISTORY_BITS    5
+#define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
 
 typedef struct SavedContext {
     int offset;
@@ -68,6 +87,13 @@ typedef struct WavpackFrameContext {
     WvChannel ch[2];
     int pos;
     SavedContext sc, extra_sc;
+
+    GetByteContext dsd_gb;
+    int ptable [PTABLE_BINS];
+    int16_t summed_probabilities [MAX_HISTORY_BINS] [256];
+    unsigned char probabilities [MAX_HISTORY_BINS] [256];
+    unsigned char *value_lookup [MAX_HISTORY_BINS];
+    DSDContext dsdctx[2];
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -386,6 +412,376 @@ static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc,
     return 0;
 }
 
+static void init_ptable (int *table, int rate_i, int rate_s)
+{
+    int value = 0x808000, rate = rate_i << 8, c, i;
+
+    for (c = (rate + 128) >> 8; c--;)
+        value += (DOWN - value) >> DECAY;
+
+    for (i = 0; i < PTABLE_BINS/2; ++i) {
+        table [i] = value;
+        table [PTABLE_BINS-1-i] = 0x100ffff - value;
+
+        if (value > 0x010000) {
+            rate += (rate * rate_s + 128) >> 8;
+
+            for (c = (rate + 64) >> 7; c--;)
+                value += (DOWN - value) >> DECAY;
+        }
+    }
+}
+
+typedef struct {
+    int32_t value, filter0, filter1, filter2, filter3, filter4, filter5, filter6, factor, byte;
+} DSDfilters;
+
+static int wv_unpack_dsd_high(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    uint8_t *dsd_l                  = dst_l;
+    uint8_t *dsd_r                  = dst_r;
+    uint32_t crc                    = 0xFFFFFFFF;
+    int total_samples = s->samples, stereo = dst_r ? 1 : 0;
+    DSDfilters filters [2], *sp = filters;
+    int channel, rate_i, rate_s, i;
+    uint32_t low, high, value;
+
+    if (bytestream2_get_bytes_left(&s->dsd_gb) < (stereo ? 20 : 13))
+        return AVERROR_INVALIDDATA;
+
+    rate_i = bytestream2_get_byte(&s->dsd_gb);
+    rate_s = bytestream2_get_byte(&s->dsd_gb);
+
+    if (rate_s != RATE_S)
+        return AVERROR_INVALIDDATA;
+
+    init_ptable (s->ptable, rate_i, rate_s);
+
+    for (channel = 0; channel < stereo + 1; ++channel) {
+        DSDfilters *sp = filters + channel;
+
+        sp->filter1 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
+        sp->filter2 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
+        sp->filter3 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
+        sp->filter4 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
+        sp->filter5 = bytestream2_get_byte(&s->dsd_gb) << (PRECISION - 8);
+        sp->filter6 = 0;
+        sp->factor = bytestream2_get_byte(&s->dsd_gb) & 0xff;
+        sp->factor |= (bytestream2_get_byte(&s->dsd_gb) << 8) & 0xff00;
+        sp->factor = (sp->factor << 16) >> 16;
+    }
+
+    high = 0xffffffff;
+    low = 0x0;
+
+    for (i = 4; i--;)
+        value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+
+    memset (dst_l, 0x69, total_samples * 4);
+
+    if (stereo)
+        memset (dst_r, 0x69, total_samples * 4);
+
+    while (total_samples--) {
+        int bitcount = 8;
+
+        sp [0].value = sp [0].filter1 - sp [0].filter5 + ((sp [0].filter6 * sp [0].factor) >> 2);
+
+        if (stereo)
+            sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
+
+        while (bitcount--) {
+            int32_t *pp = s->ptable + ((sp [0].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            uint32_t split = low + ((high - low) >> 8) * (*pp >> 16);
+
+            if (value <= split) {
+                high = split;
+                *pp += (UP - *pp) >> DECAY;
+                sp [0].filter0 = -1;
+            }
+            else {
+                low = split + 1;
+                *pp += (DOWN - *pp) >> DECAY;
+                sp [0].filter0 = 0;
+            }
+
+            while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->dsd_gb)) {
+                value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+                high = (high << 8) | 0xff;
+                low <<= 8;
+            }
+
+            sp [0].value += sp [0].filter6 << 3;
+            sp [0].byte = (sp [0].byte << 1) | (sp [0].filter0 & 1);
+            sp [0].factor += (((sp [0].value ^ sp [0].filter0) >> 31) | 1) & ((sp [0].value ^ (sp [0].value - (sp [0].filter6 << 4))) >> 31);
+            sp [0].filter1 += ((sp [0].filter0 & VALUE_ONE) - sp [0].filter1) >> 6;
+            sp [0].filter2 += ((sp [0].filter0 & VALUE_ONE) - sp [0].filter2) >> 4;
+            sp [0].filter3 += (sp [0].filter2 - sp [0].filter3) >> 4;
+            sp [0].filter4 += (sp [0].filter3 - sp [0].filter4) >> 4;
+            sp [0].value = (sp [0].filter4 - sp [0].filter5) >> 4;
+            sp [0].filter5 += sp [0].value;
+            sp [0].filter6 += (sp [0].value - sp [0].filter6) >> 3;
+            sp [0].value = sp [0].filter1 - sp [0].filter5 + ((sp [0].filter6 * sp [0].factor) >> 2);
+
+            if (!stereo)
+                continue;
+
+            pp = s->ptable + ((sp [1].value >> (PRECISION - PRECISION_USE)) & PTABLE_MASK);
+            split = low + ((high - low) >> 8) * (*pp >> 16);
+
+            if (value <= split) {
+                high = split;
+                *pp += (UP - *pp) >> DECAY;
+                sp [1].filter0 = -1;
+            }
+            else {
+                low = split + 1;
+                *pp += (DOWN - *pp) >> DECAY;
+                sp [1].filter0 = 0;
+            }
+
+            while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->dsd_gb)) {
+                value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+                high = (high << 8) | 0xff;
+                low <<= 8;
+            }
+
+            sp [1].value += sp [1].filter6 << 3;
+            sp [1].byte = (sp [1].byte << 1) | (sp [1].filter0 & 1);
+            sp [1].factor += (((sp [1].value ^ sp [1].filter0) >> 31) | 1) & ((sp [1].value ^ (sp [1].value - (sp [1].filter6 << 4))) >> 31);
+            sp [1].filter1 += ((sp [1].filter0 & VALUE_ONE) - sp [1].filter1) >> 6;
+            sp [1].filter2 += ((sp [1].filter0 & VALUE_ONE) - sp [1].filter2) >> 4;
+            sp [1].filter3 += (sp [1].filter2 - sp [1].filter3) >> 4;
+            sp [1].filter4 += (sp [1].filter3 - sp [1].filter4) >> 4;
+            sp [1].value = (sp [1].filter4 - sp [1].filter5) >> 4;
+            sp [1].filter5 += sp [1].value;
+            sp [1].filter6 += (sp [1].value - sp [1].filter6) >> 3;
+            sp [1].value = sp [1].filter1 - sp [1].filter5 + ((sp [1].filter6 * sp [1].factor) >> 2);
+        }
+
+        crc += (crc << 1) + (*dsd_l = sp [0].byte & 0xff);
+        sp [0].factor -= (sp [0].factor + 512) >> 10;
+        dsd_l += 4;
+
+        if (stereo) {
+            crc += (crc << 1) + (*dsd_r = filters [1].byte & 0xff);
+            filters [1].factor -= (filters [1].factor + 512) >> 10;
+            dsd_r += 4;
+        }
+    }
+
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
+        return AVERROR_INVALIDDATA;
+
+    return 0;
+}
+
+static int wv_unpack_dsd_fast(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    uint8_t *dsd_l                  = dst_l;
+    uint8_t *dsd_r                  = dst_r;
+    unsigned char history_bits, max_probability;
+    int total_summed_probabilities  = 0;
+    int total_samples               = s->samples;
+    int history_bins, p0, p1, chan;
+    uint32_t crc                    = 0xFFFFFFFF;
+    uint32_t low, high, value;
+    int ret = 0, i;
+
+    if (!bytestream2_get_bytes_left(&s->dsd_gb))
+        return AVERROR_INVALIDDATA;
+
+    history_bits = bytestream2_get_byte(&s->dsd_gb);
+
+    if (!bytestream2_get_bytes_left(&s->dsd_gb) || history_bits > MAX_HISTORY_BITS)
+        return AVERROR_INVALIDDATA;
+
+    history_bins = 1 << history_bits;
+    max_probability = bytestream2_get_byte(&s->dsd_gb);
+
+    if (max_probability < 0xff) {
+        unsigned char *outptr = (unsigned char *) s->probabilities;
+        unsigned char *outend = outptr + sizeof (*s->probabilities) * history_bins;
+
+        while (outptr < outend && bytestream2_get_bytes_left(&s->dsd_gb)) {
+            int code = bytestream2_get_byte(&s->dsd_gb);
+
+            if (code > max_probability) {
+                int zcount = code - max_probability;
+
+                while (outptr < outend && zcount--)
+                    *outptr++ = 0;
+            }
+            else if (code)
+                *outptr++ = code;
+            else
+                break;
+        }
+
+        if (outptr < outend || (bytestream2_get_bytes_left(&s->dsd_gb) && bytestream2_get_byte(&s->dsd_gb)))
+            return AVERROR_INVALIDDATA;
+    }
+    else if (bytestream2_get_bytes_left(&s->dsd_gb) > (int) sizeof (*s->probabilities) * history_bins)
+        bytestream2_get_buffer(&s->dsd_gb, (uint8_t *) s->probabilities, sizeof (*s->probabilities) * history_bins);
+    else
+        return AVERROR_INVALIDDATA;
+
+    for (p0 = 0; p0 < history_bins; ++p0) {
+        int32_t sum_values;
+        unsigned char *vp;
+
+        for (sum_values = i = 0; i < 256; ++i)
+            s->summed_probabilities [p0] [i] = sum_values += s->probabilities [p0] [i];
+
+        if (sum_values) {
+            total_summed_probabilities += sum_values;
+            vp = s->value_lookup [p0] = av_malloc (sum_values);
+
+            for (i = 0; i < 256; i++) {
+                int c = s->probabilities [p0] [i];
+
+                while (c--)
+                    *vp++ = i;
+            }
+        }
+    }
+
+    if (bytestream2_get_bytes_left(&s->dsd_gb) < 4 || total_summed_probabilities > history_bins * 1280) {
+        ret = AVERROR_INVALIDDATA;
+        goto done;
+    }
+
+    for (i = 4; i--;)
+        value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+
+    chan = p0 = p1 = 0;
+    low = 0; high = 0xffffffff;
+
+    memset (dst_l, 0x69, total_samples * 4);
+
+    if (dst_r) {
+        memset (dst_r, 0x69, total_samples * 4);
+        total_samples *= 2;
+    }
+
+    while (total_samples--) {
+        int mult, index, code;
+
+        if (!s->summed_probabilities [p0] [255]) {
+            ret = AVERROR_INVALIDDATA;
+            goto done;
+        }
+
+        mult = (high - low) / s->summed_probabilities [p0] [255];
+
+        if (!mult) {
+            if (bytestream2_get_bytes_left(&s->dsd_gb) >= 4)
+                for (i = 4; i--;)
+                    value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+
+            low = 0;
+            high = 0xffffffff;
+            mult = high / s->summed_probabilities [p0] [255];
+
+            if (!mult) {
+                ret = AVERROR_INVALIDDATA;
+                goto done;
+            }
+        }
+
+        index = (value - low) / mult;
+
+        if (index >= s->summed_probabilities [p0] [255]) {
+            ret = AVERROR_INVALIDDATA;
+            goto done;
+        }
+
+        if (!dst_r) {
+            if ((*dsd_l = code = s->value_lookup [p0] [index]))
+                low += s->summed_probabilities [p0] [code-1] * mult;
+
+            dsd_l += 4;
+        }
+        else {
+            if ((code = s->value_lookup [p0] [index]))
+                low += s->summed_probabilities [p0] [code-1] * mult;
+
+            if (chan) {
+                *dsd_r = code;
+                dsd_r += 4;
+            }
+            else {
+                *dsd_l = code;
+                dsd_l += 4;
+            }
+
+            chan ^= 1;
+        }
+
+        high = low + s->probabilities [p0] [code] * mult - 1;
+        crc += (crc << 1) + code;
+
+        if (!dst_r)
+            p0 = code & (history_bins-1);
+        else {
+            p0 = p1;
+            p1 = code & (history_bins-1);
+        }
+
+        while (DSD_BYTE_READY (high, low) && bytestream2_get_bytes_left(&s->dsd_gb)) {
+            value = (value << 8) | bytestream2_get_byte(&s->dsd_gb);
+            high = (high << 8) | 0xff;
+            low <<= 8;
+        }
+    }
+
+done:
+    for (p0 = 0; p0 < history_bins; ++p0)
+        if (s->value_lookup [p0]) {
+            av_free (s->value_lookup [p0]);
+            s->value_lookup [p0] = NULL;
+        }
+
+    if (ret < 0)
+        return ret;
+
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
+        ret = AVERROR_INVALIDDATA;
+
+    return ret;
+}
+
+static int wv_unpack_dsd_copy(WavpackFrameContext *s, void *dst_l, void *dst_r)
+{
+    uint8_t *dsd_l              = dst_l;
+    uint8_t *dsd_r              = dst_r;
+    int total_samples           = s->samples;
+    uint32_t crc                = 0xFFFFFFFF;
+
+    if (bytestream2_get_bytes_left (&s->dsd_gb) != total_samples * (dst_r ? 2 : 1))
+        return AVERROR_INVALIDDATA;
+
+    memset (dst_l, 0x69, total_samples * 4);
+
+    if (dst_r)
+        memset (dst_r, 0x69, total_samples * 4);
+
+    while (total_samples--) {
+        crc += (crc << 1) + (*dsd_l = bytestream2_get_byte(&s->dsd_gb));
+        dsd_l += 4;
+
+        if (dst_r) {
+            crc += (crc << 1) + (*dsd_r = bytestream2_get_byte(&s->dsd_gb));
+            dsd_r += 4;
+        }
+    }
+
+    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, crc, 0))
+        return AVERROR_INVALIDDATA;
+
+    return 0;
+}
+
 static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
                                    void *dst_l, void *dst_r, const int type)
 {
@@ -598,19 +994,12 @@ static av_cold int wv_alloc_frame_context(WavpackContext *c)
         return -1;
     c->fdec_num++;
     c->fdec[c->fdec_num - 1]->avctx = c->avctx;
+    memset(c->fdec[c->fdec_num - 1]->dsdctx[0].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[0].buf));
+    memset(c->fdec[c->fdec_num - 1]->dsdctx[1].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[1].buf));
     wv_reset_saved_context(c->fdec[c->fdec_num - 1]);
 
     return 0;
 }
-
-#if HAVE_THREADS
-static int init_thread_copy(AVCodecContext *avctx)
-{
-    WavpackContext *s = avctx->priv_data;
-    s->avctx = avctx;
-    return 0;
-}
-#endif
 
 static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 {
@@ -620,15 +1009,16 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 
     s->fdec_num = 0;
 
+    ff_init_dsd_data();
+
     return 0;
 }
 
 static av_cold int wavpack_decode_end(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
-    int i;
 
-    for (i = 0; i < s->fdec_num; i++)
+    for (int i = 0; i < s->fdec_num; i++)
         av_freep(&s->fdec[i]);
     s->fdec_num = 0;
 
@@ -639,15 +1029,15 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                                 AVFrame *frame, const uint8_t *buf, int buf_size)
 {
     WavpackContext *wc = avctx->priv_data;
-    ThreadFrame tframe = { .f = frame };
     WavpackFrameContext *s;
     GetByteContext gb;
     void *samples_l = NULL, *samples_r = NULL;
     int ret;
     int got_terms   = 0, got_weights = 0, got_samples = 0,
         got_entropy = 0, got_bs      = 0, got_float   = 0, got_hybrid = 0;
+    int got_dsd = 0;
     int i, j, id, size, ssize, weights, t;
-    int bpp, chan = 0, chmask = 0, orig_bpp, sample_rate = 0;
+    int bpp, chan = 0, chmask = 0, orig_bpp, sample_rate = 0, rate_x = 1, dsd_mode = 0;
     int multiblock;
 
     if (block_no >= wc->fdec_num && wv_alloc_frame_context(wc) < 0) {
@@ -905,6 +1295,23 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, size);
             got_bs       = 1;
             break;
+        case WP_ID_DSD_DATA:
+            if (size < 2) {
+                av_log(avctx, AV_LOG_ERROR, "Invalid DSD_DATA, size = %i\n",
+                       size);
+                bytestream2_skip(&gb, ssize);
+                continue;
+            }
+            rate_x = 1 << bytestream2_get_byte(&gb);
+            dsd_mode = bytestream2_get_byte(&gb);
+            if (dsd_mode && dsd_mode != 1 && dsd_mode != 3) {
+                av_log(avctx, AV_LOG_ERROR, "Invalid DSD encoding mode: %d\n", dsd_mode);
+                return AVERROR_INVALIDDATA;
+            }
+            bytestream2_init(&s->dsd_gb, gb.buffer, size-2);
+            bytestream2_skip(&gb, size-2);
+            got_dsd      = 1;
+            break;
         case WP_ID_EXTRABITS:
             if (size <= 4) {
                 av_log(avctx, AV_LOG_ERROR, "Invalid EXTRABITS, size = %i\n",
@@ -979,41 +1386,44 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, 1);
     }
 
-    if (!got_terms) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation terms\n");
-        return AVERROR_INVALIDDATA;
+    if (got_bs) {
+        if (!got_terms) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation terms\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_weights) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation weights\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_samples) {
+            av_log(avctx, AV_LOG_ERROR, "No block with decorrelation samples\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_entropy) {
+            av_log(avctx, AV_LOG_ERROR, "No block with entropy info\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (s->hybrid && !got_hybrid) {
+            av_log(avctx, AV_LOG_ERROR, "Hybrid config not found\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (!got_float && avctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
+            av_log(avctx, AV_LOG_ERROR, "Float information not found\n");
+            return AVERROR_INVALIDDATA;
+        }
+        if (s->got_extra_bits && avctx->sample_fmt != AV_SAMPLE_FMT_FLTP) {
+            const int size   = get_bits_left(&s->gb_extra_bits);
+            const int wanted = s->samples * s->extra_bits << s->stereo_in;
+            if (size < wanted) {
+                av_log(avctx, AV_LOG_ERROR, "Too small EXTRABITS\n");
+                s->got_extra_bits = 0;
+            }
+        }
     }
-    if (!got_weights) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation weights\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_samples) {
-        av_log(avctx, AV_LOG_ERROR, "No block with decorrelation samples\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_entropy) {
-        av_log(avctx, AV_LOG_ERROR, "No block with entropy info\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (s->hybrid && !got_hybrid) {
-        av_log(avctx, AV_LOG_ERROR, "Hybrid config not found\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (!got_bs) {
+
+    if (!got_bs && !got_dsd) {
         av_log(avctx, AV_LOG_ERROR, "Packed samples not found\n");
         return AVERROR_INVALIDDATA;
-    }
-    if (!got_float && avctx->sample_fmt == AV_SAMPLE_FMT_FLTP) {
-        av_log(avctx, AV_LOG_ERROR, "Float information not found\n");
-        return AVERROR_INVALIDDATA;
-    }
-    if (s->got_extra_bits && avctx->sample_fmt != AV_SAMPLE_FMT_FLTP) {
-        const int size   = get_bits_left(&s->gb_extra_bits);
-        const int wanted = s->samples * s->extra_bits << s->stereo_in;
-        if (size < wanted) {
-            av_log(avctx, AV_LOG_ERROR, "Too small EXTRABITS\n");
-            s->got_extra_bits = 0;
-        }
     }
 
     if (!wc->ch_offset) {
@@ -1023,9 +1433,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 av_log(avctx, AV_LOG_ERROR, "Custom sample rate missing.\n");
                 return AVERROR_INVALIDDATA;
             }
-            avctx->sample_rate = sample_rate;
+            avctx->sample_rate = sample_rate * rate_x;
         } else
-            avctx->sample_rate = wv_rates[sr];
+            avctx->sample_rate = wv_rates[sr] * rate_x;
 
         if (multiblock) {
             if (chan)
@@ -1039,10 +1449,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
 
         /* get output buffer */
-        frame->nb_samples = s->samples + 1;
-        if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
-            return ret;
         frame->nb_samples = s->samples;
+        if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+            return ret;
     }
 
     if (wc->ch_offset + s->stereo >= avctx->channels) {
@@ -1057,19 +1466,41 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     wc->ch_offset += 1 + s->stereo;
 
     if (s->stereo_in) {
-        ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
-        if (ret < 0)
-            return ret;
-    } else {
-        ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
-        if (ret < 0)
-            return ret;
+        if (got_dsd) {
+            if (dsd_mode == 3)
+                ret = wv_unpack_dsd_high(s, samples_l, samples_r);
+            else if (dsd_mode == 1)
+                ret = wv_unpack_dsd_fast(s, samples_l, samples_r);
+            else
+                ret = wv_unpack_dsd_copy(s, samples_l, samples_r);
+        }
+        else
+            ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+    }
+    else {
+        if (got_dsd) {
+            if (dsd_mode == 3)
+                ret = wv_unpack_dsd_high(s, samples_l, NULL);
+            else if (dsd_mode == 1)
+                ret = wv_unpack_dsd_fast(s, samples_l, NULL);
+            else
+                ret = wv_unpack_dsd_copy(s, samples_l, NULL);
+        }
+        else
+            ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
 
         if (s->stereo)
             memcpy(samples_r, samples_l, bpp * s->samples);
     }
 
-    return 0;
+    if (got_dsd) {
+        ff_dsd2pcm_translate (&s->dsdctx [0], s->samples, 0, samples_l, 4, samples_l, 1);
+
+        if (s->stereo)
+            ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
+    }
+
+    return ret;
 }
 
 static void wavpack_decode_flush(AVCodecContext *avctx)
@@ -1105,7 +1536,7 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
         return AVERROR_INVALIDDATA;
     }
 
-    if (frame_flags & 0x80) {
+    if (frame_flags & (WV_FLOAT_DATA | WV_DSD_DATA)) {
         avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
     } else if ((frame_flags & 0x03) <= 1) {
         avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
@@ -1155,6 +1586,5 @@ AVCodec ff_wavpack_decoder = {
     .close          = wavpack_decode_end,
     .decode         = wavpack_decode_frame,
     .flush          = wavpack_decode_flush,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
-    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .capabilities   = AV_CODEC_CAP_DR1,
 };
