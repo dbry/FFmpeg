@@ -54,13 +54,6 @@
 #define MAX_HISTORY_BITS    5
 #define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
 
-typedef struct SavedContext {
-    int offset;
-    int size;
-    int bits_used;
-    uint32_t crc;
-} SavedContext;
-
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
     int frame_flags;
@@ -71,7 +64,6 @@ typedef struct WavpackFrameContext {
     int got_extra_bits;
     uint32_t crc_extra_bits;
     GetBitContext gb_extra_bits;
-    int data_size; // in bits
     int samples;
     int terms;
     Decorr decorr[MAX_TERMS];
@@ -85,8 +77,6 @@ typedef struct WavpackFrameContext {
     int float_shift;
     int float_max_exp;
     WvChannel ch[2];
-    int pos;
-    SavedContext sc, extra_sc;
 
     GetByteContext dsd_gb;
     int ptable [PTABLE_BINS];
@@ -389,12 +379,6 @@ static float wv_get_value_float(WavpackFrameContext *s, uint32_t *crc, int S)
 
     value.u = (sign << 31) | (exp << 23) | S;
     return value.f;
-}
-
-static void wv_reset_saved_context(WavpackFrameContext *s)
-{
-    s->pos    = 0;
-    s->sc.crc = s->extra_sc.crc = 0xFFFFFFFF;
 }
 
 static inline int wv_check_crc(WavpackFrameContext *s, uint32_t crc,
@@ -788,9 +772,9 @@ static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
     int i, j, count = 0;
     int last, t;
     int A, B, L, L2, R, R2;
-    int pos                 = s->pos;
-    uint32_t crc            = s->sc.crc;
-    uint32_t crc_extra_bits = s->extra_sc.crc;
+    int pos                 = 0;
+    uint32_t crc            = 0xFFFFFFFF;
+    uint32_t crc_extra_bits = 0xFFFFFFFF;
     int16_t *dst16_l        = dst_l;
     int16_t *dst16_r        = dst_r;
     int32_t *dst32_l        = dst_l;
@@ -900,8 +884,6 @@ static inline int wv_unpack_stereo(WavpackFrameContext *s, GetBitContext *gb,
         count++;
     } while (!last && count < s->samples);
 
-    wv_reset_saved_context(s);
-
     if (last && count < s->samples) {
         int size = av_get_bytes_per_sample(type);
         memset((uint8_t*)dst_l + count*size, 0, (s->samples-count)*size);
@@ -921,9 +903,9 @@ static inline int wv_unpack_mono(WavpackFrameContext *s, GetBitContext *gb,
     int i, j, count = 0;
     int last, t;
     int A, S, T;
-    int pos                  = s->pos;
-    uint32_t crc             = s->sc.crc;
-    uint32_t crc_extra_bits  = s->extra_sc.crc;
+    int pos                  = 0;
+    uint32_t crc             = 0xFFFFFFFF;
+    uint32_t crc_extra_bits  = 0xFFFFFFFF;
     int16_t *dst16           = dst;
     int32_t *dst32           = dst;
     float *dstfl             = dst;
@@ -968,8 +950,6 @@ static inline int wv_unpack_mono(WavpackFrameContext *s, GetBitContext *gb,
         count++;
     } while (!last && count < s->samples);
 
-    wv_reset_saved_context(s);
-
     if (last && count < s->samples) {
         int size = av_get_bytes_per_sample(type);
         memset((uint8_t*)dst + count*size, 0, (s->samples-count)*size);
@@ -996,7 +976,6 @@ static av_cold int wv_alloc_frame_context(WavpackContext *c)
     c->fdec[c->fdec_num - 1]->avctx = c->avctx;
     memset(c->fdec[c->fdec_num - 1]->dsdctx[0].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[0].buf));
     memset(c->fdec[c->fdec_num - 1]->dsdctx[1].buf, 0x69, sizeof(c->fdec[c->fdec_num - 1]->dsdctx[1].buf));
-    wv_reset_saved_context(c->fdec[c->fdec_num - 1]);
 
     return 0;
 }
@@ -1287,11 +1266,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, 1);
             break;
         case WP_ID_DATA:
-            s->sc.offset = bytestream2_tell(&gb);
-            s->sc.size   = size * 8;
             if ((ret = init_get_bits8(&s->gb, gb.buffer, size)) < 0)
                 return ret;
-            s->data_size = size * 8;
             bytestream2_skip(&gb, size);
             got_bs       = 1;
             break;
@@ -1319,8 +1295,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                 bytestream2_skip(&gb, size);
                 continue;
             }
-            s->extra_sc.offset = bytestream2_tell(&gb);
-            s->extra_sc.size   = size * 8;
             if ((ret = init_get_bits8(&s->gb_extra_bits, gb.buffer, size)) < 0)
                 return ret;
             s->crc_extra_bits  = get_bits_long(&s->gb_extra_bits, 32);
@@ -1505,11 +1479,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
 static void wavpack_decode_flush(AVCodecContext *avctx)
 {
-    WavpackContext *s = avctx->priv_data;
-    int i;
-
-    for (i = 0; i < s->fdec_num; i++)
-        wv_reset_saved_context(s->fdec[i]);
 }
 
 static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
