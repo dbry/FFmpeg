@@ -179,7 +179,7 @@ static int wv_read_block_header(AVFormatContext *ctx, AVIOContext *pb)
                            "Invalid DSD block\n");
                     return AVERROR_INVALIDDATA;
                 }
-                rate_x = 1 << avio_r8(pb);
+                rate_x = 1U << (avio_r8(pb) & 0x1f);
                 if (size)
                     avio_skip(pb, size-1);
                 break;

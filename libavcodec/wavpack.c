@@ -82,7 +82,7 @@ typedef struct WavpackFrameContext {
     GetByteContext gbyte;
     int ptable [PTABLE_BINS];
     uint8_t value_lookup_buffer[MAX_HISTORY_BINS*MAX_BIN_BYTES];
-    int16_t summed_probabilities[MAX_HISTORY_BINS][256];
+    uint16_t summed_probabilities[MAX_HISTORY_BINS][256];
     uint8_t probabilities[MAX_HISTORY_BINS][256];
     uint8_t *value_lookup[MAX_HISTORY_BINS];
     DSDContext dsdctx[2];
@@ -419,7 +419,8 @@ static void init_ptable(int *table, int rate_i, int rate_s)
 }
 
 typedef struct {
-    int32_t value, fltr0, fltr1, fltr2, fltr3, fltr4, fltr5, fltr6, factor, byte;
+    int32_t value, fltr0, fltr1, fltr2, fltr3, fltr4, fltr5, fltr6, factor;
+    unsigned int byte;
 } DSDfilters;
 
 static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
@@ -452,7 +453,7 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         sp->fltr6 = 0;
         sp->factor = bytestream2_get_byte(&s->gbyte) & 0xff;
         sp->factor |= (bytestream2_get_byte(&s->gbyte) << 8) & 0xff00;
-        sp->factor = (sp->factor << 16) >> 16;
+        sp->factor = (int32_t)((uint32_t)sp->factor << 16) >> 16;
     }
 
     value = bytestream2_get_be32(&s->gbyte);
@@ -492,10 +493,10 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
                 low <<= 8;
             }
 
-            sp[0].value += sp[0].fltr6 << 3;
+            sp[0].value += sp[0].fltr6 * 8;
             sp[0].byte = (sp[0].byte << 1) | (sp[0].fltr0 & 1);
             sp[0].factor += (((sp[0].value ^ sp[0].fltr0) >> 31) | 1) &
-                ((sp[0].value ^ (sp[0].value - (sp[0].fltr6 << 4))) >> 31);
+                ((sp[0].value ^ (sp[0].value - (sp[0].fltr6 * 16))) >> 31);
             sp[0].fltr1 += ((sp[0].fltr0 & VALUE_ONE) - sp[0].fltr1) >> 6;
             sp[0].fltr2 += ((sp[0].fltr0 & VALUE_ONE) - sp[0].fltr2) >> 4;
             sp[0].fltr3 += (sp[0].fltr2 - sp[0].fltr3) >> 4;
@@ -527,10 +528,10 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
                 low <<= 8;
             }
 
-            sp[1].value += sp[1].fltr6 << 3;
+            sp[1].value += sp[1].fltr6 * 8;
             sp[1].byte = (sp[1].byte << 1) | (sp[1].fltr0 & 1);
             sp[1].factor += (((sp[1].value ^ sp[1].fltr0) >> 31) | 1) &
-                ((sp[1].value ^ (sp[1].value - (sp[1].fltr6 << 4))) >> 31);
+                ((sp[1].value ^ (sp[1].value - (sp[1].fltr6 * 16))) >> 31);
             sp[1].fltr1 += ((sp[1].fltr0 & VALUE_ONE) - sp[1].fltr1) >> 6;
             sp[1].fltr2 += ((sp[1].fltr0 & VALUE_ONE) - sp[1].fltr2) >> 4;
             sp[1].fltr3 += (sp[1].fltr2 - sp[1].fltr3) >> 4;
@@ -647,7 +648,7 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     }
 
     while (total_samples--) {
-        int mult, index, code;
+        unsigned int mult, index, code;
 
         if (!s->summed_probabilities[p0][255])
             return AVERROR_INVALIDDATA;
