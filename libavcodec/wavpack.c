@@ -27,6 +27,7 @@
 #include "bytestream.h"
 #include "get_bits.h"
 #include "internal.h"
+#include "thread.h"
 #include "unary.h"
 #include "wavpack.h"
 #include "dsd.h"
@@ -85,7 +86,6 @@ typedef struct WavpackFrameContext {
     uint16_t summed_probabilities[MAX_HISTORY_BINS][256];
     uint8_t probabilities[MAX_HISTORY_BINS][256];
     uint8_t *value_lookup[MAX_HISTORY_BINS];
-    DSDContext dsdctx[2];
 } WavpackFrameContext;
 
 #define WV_MAX_FRAME_DECODERS 14
@@ -99,6 +99,8 @@ typedef struct WavpackContext {
     int block;
     int samples;
     int ch_offset;
+
+    DSDContext *dsdctx;
 } WavpackContext;
 
 #define LEVEL_DECAY(a)  (((a) + 0x80) >> 8)
@@ -953,13 +955,23 @@ static av_cold int wv_alloc_frame_context(WavpackContext *c)
         return -1;
     c->fdec_num++;
     c->fdec[c->fdec_num - 1]->avctx = c->avctx;
-    memset(c->fdec[c->fdec_num - 1]->dsdctx[0].buf, 0x69,
-        sizeof(c->fdec[c->fdec_num - 1]->dsdctx[0].buf));
-    memset(c->fdec[c->fdec_num - 1]->dsdctx[1].buf, 0x69,
-        sizeof(c->fdec[c->fdec_num - 1]->dsdctx[1].buf));
 
     return 0;
 }
+
+#if HAVE_THREADS
+static int init_thread_copy(AVCodecContext *avctx)
+{
+    WavpackContext *s = avctx->priv_data;
+    s->avctx = avctx;
+    return 0;
+}
+
+static int update_thread_context(AVCodecContext *dst, const AVCodecContext *src)
+{
+    return 0;
+}
+#endif
 
 static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 {
@@ -968,6 +980,13 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
     s->avctx = avctx;
 
     s->fdec_num = 0;
+
+    // the DSD to PCM context is shared (and used serially) between all decoding threads
+
+    s->dsdctx = av_calloc(avctx->channels, sizeof (DSDContext));
+
+    for (int i = 0; i < avctx->channels; i++)
+        memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
 
     ff_init_dsd_data();
 
@@ -982,6 +1001,9 @@ static av_cold int wavpack_decode_end(AVCodecContext *avctx)
         av_freep(&s->fdec[i]);
     s->fdec_num = 0;
 
+    if (!avctx->internal->is_copy)
+        av_freep(&s->dsdctx);
+
     return 0;
 }
 
@@ -989,6 +1011,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                                 AVFrame *frame, const uint8_t *buf, int buf_size)
 {
     WavpackContext *wc = avctx->priv_data;
+    ThreadFrame tframe = { .f = frame };
     WavpackFrameContext *s;
     GetByteContext gb;
     void *samples_l = NULL, *samples_r = NULL;
@@ -1405,8 +1428,11 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
         /* get output buffer */
         frame->nb_samples = s->samples;
-        if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
+        if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
             return ret;
+
+        if (got_bs)
+            ff_thread_finish_setup(avctx);
     }
 
     if (wc->ch_offset + s->stereo >= avctx->channels) {
@@ -1417,8 +1443,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     samples_l = frame->extended_data[wc->ch_offset];
     if (s->stereo)
         samples_r = frame->extended_data[wc->ch_offset + 1];
-
-    wc->ch_offset += 1 + s->stereo;
 
     if (s->stereo_in) {
         if (got_dsd) {
@@ -1447,11 +1471,13 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             memcpy(samples_r, samples_l, bpp * s->samples);
     }
 
-    if (got_dsd) {
-        ff_dsd2pcm_translate (&s->dsdctx [0], s->samples, 0, samples_l, 4, samples_l, 1);
+    wc->ch_offset += 1 + s->stereo;
 
-        if (s->stereo)
-            ff_dsd2pcm_translate (&s->dsdctx [1], s->samples, 0, samples_r, 4, samples_r, 1);
+    if (!ret && got_dsd && wc->ch_offset == avctx->channels) {
+        // ff_thread_await_prev_finished(avctx);
+
+        for (i = 0; i < avctx->channels; ++i)
+            ff_dsd2pcm_translate (&wc->dsdctx [i], s->samples, 0, (uint8_t *) frame->extended_data[i], 4, (float *) frame->extended_data[i], 1);
     }
 
     return ret;
@@ -1535,5 +1561,7 @@ AVCodec ff_wavpack_decoder = {
     .close          = wavpack_decode_end,
     .decode         = wavpack_decode_frame,
     .flush          = wavpack_decode_flush,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
+    .update_thread_context = ONLY_IF_THREADS_ENABLED(update_thread_context),
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
 };
