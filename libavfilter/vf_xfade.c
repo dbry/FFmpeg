@@ -49,6 +49,18 @@ enum XFadeTransitions {
     SMOOTHRIGHT,
     SMOOTHUP,
     SMOOTHDOWN,
+    CIRCLEOPEN,
+    CIRCLECLOSE,
+    VERTOPEN,
+    VERTCLOSE,
+    HORZOPEN,
+    HORZCLOSE,
+    DISSOLVE,
+    PIXELIZE,
+    DIAGTL,
+    DIAGTR,
+    DIAGBL,
+    DIAGBR,
     NB_TRANSITIONS,
 };
 
@@ -150,6 +162,18 @@ static const AVOption xfade_options[] = {
     {   "smoothright","smoothright transition", 0, AV_OPT_TYPE_CONST, {.i64=SMOOTHRIGHT},0, 0, FLAGS, "transition" },
     {   "smoothup",   "smoothup transition",    0, AV_OPT_TYPE_CONST, {.i64=SMOOTHUP},   0, 0, FLAGS, "transition" },
     {   "smoothdown", "smoothdown transition",  0, AV_OPT_TYPE_CONST, {.i64=SMOOTHDOWN}, 0, 0, FLAGS, "transition" },
+    {   "circleopen", "circleopen transition",  0, AV_OPT_TYPE_CONST, {.i64=CIRCLEOPEN}, 0, 0, FLAGS, "transition" },
+    {   "circleclose","circleclose transition", 0, AV_OPT_TYPE_CONST, {.i64=CIRCLECLOSE},0, 0, FLAGS, "transition" },
+    {   "vertopen",   "vert open transition",   0, AV_OPT_TYPE_CONST, {.i64=VERTOPEN},   0, 0, FLAGS, "transition" },
+    {   "vertclose",  "vert close transition",  0, AV_OPT_TYPE_CONST, {.i64=VERTCLOSE},  0, 0, FLAGS, "transition" },
+    {   "horzopen",   "horz open transition",   0, AV_OPT_TYPE_CONST, {.i64=HORZOPEN},   0, 0, FLAGS, "transition" },
+    {   "horzclose",  "horz close transition",  0, AV_OPT_TYPE_CONST, {.i64=HORZCLOSE},  0, 0, FLAGS, "transition" },
+    {   "dissolve",   "dissolve transition",    0, AV_OPT_TYPE_CONST, {.i64=DISSOLVE},   0, 0, FLAGS, "transition" },
+    {   "pixelize",   "pixelize transition",    0, AV_OPT_TYPE_CONST, {.i64=PIXELIZE},   0, 0, FLAGS, "transition" },
+    {   "diagtl",     "diag tl transition",     0, AV_OPT_TYPE_CONST, {.i64=DIAGTL},     0, 0, FLAGS, "transition" },
+    {   "diagtr",     "diag tr transition",     0, AV_OPT_TYPE_CONST, {.i64=DIAGTR},     0, 0, FLAGS, "transition" },
+    {   "diagbl",     "diag bl transition",     0, AV_OPT_TYPE_CONST, {.i64=DIAGBL},     0, 0, FLAGS, "transition" },
+    {   "diagbr",     "diag br transition",     0, AV_OPT_TYPE_CONST, {.i64=DIAGBR},     0, 0, FLAGS, "transition" },
     { "duration", "set cross fade duration", OFFSET(duration), AV_OPT_TYPE_DURATION, {.i64=1000000}, 0, 60000000, FLAGS },
     { "offset",   "set cross fade start relative to first input stream", OFFSET(offset), AV_OPT_TYPE_DURATION, {.i64=0}, INT64_MIN, INT64_MAX, FLAGS },
     { "expr",   "set expression for custom transition", OFFSET(custom_str), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, FLAGS },
@@ -796,6 +820,354 @@ static void smoothdown##name##_transition(AVFilterContext *ctx,                 
 SMOOTHDOWN_TRANSITION(8, uint8_t, 1)
 SMOOTHDOWN_TRANSITION(16, uint16_t, 2)
 
+#define CIRCLEOPEN_TRANSITION(name, type, div)                                       \
+static void circleopen##name##_transition(AVFilterContext *ctx,                      \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const int height = out->height;                                                  \
+    const float z = hypotf(width / 2, height / 2);                                   \
+    const float p = (progress - 0.5f) * 3.f;                                         \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = hypotf(x - width / 2, y - height / 2) / z + p;      \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf0[x], xf1[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+CIRCLEOPEN_TRANSITION(8, uint8_t, 1)
+CIRCLEOPEN_TRANSITION(16, uint16_t, 2)
+
+#define CIRCLECLOSE_TRANSITION(name, type, div)                                      \
+static void circleclose##name##_transition(AVFilterContext *ctx,                     \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const int height = out->height;                                                  \
+    const float z = hypotf(width / 2, height / 2);                                   \
+    const float p = (1.f - progress - 0.5f) * 3.f;                                   \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = hypotf(x - width / 2, y - height / 2) / z + p;      \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+CIRCLECLOSE_TRANSITION(8, uint8_t, 1)
+CIRCLECLOSE_TRANSITION(16, uint16_t, 2)
+
+#define VERTOPEN_TRANSITION(name, type, div)                                         \
+static void vertopen##name##_transition(AVFilterContext *ctx,                        \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w2 = out->width / 2;                                                 \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 2.f - fabsf((x - w2) / w2) - progress * 2.f;        \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+VERTOPEN_TRANSITION(8, uint8_t, 1)
+VERTOPEN_TRANSITION(16, uint16_t, 2)
+
+#define VERTCLOSE_TRANSITION(name, type, div)                                        \
+static void vertclose##name##_transition(AVFilterContext *ctx,                       \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w2 = out->width / 2;                                                 \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 1.f + fabsf((x - w2) / w2) - progress * 2.f;        \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+VERTCLOSE_TRANSITION(8, uint8_t, 1)
+VERTCLOSE_TRANSITION(16, uint16_t, 2)
+
+#define HORZOPEN_TRANSITION(name, type, div)                                         \
+static void horzopen##name##_transition(AVFilterContext *ctx,                        \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float h2 = out->height / 2;                                                \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        const float smooth = 2.f - fabsf((y - h2) / h2) - progress * 2.f;            \
+        for (int x = 0; x < width; x++) {                                            \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+HORZOPEN_TRANSITION(8, uint8_t, 1)
+HORZOPEN_TRANSITION(16, uint16_t, 2)
+
+#define HORZCLOSE_TRANSITION(name, type, div)                                        \
+static void horzclose##name##_transition(AVFilterContext *ctx,                       \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float h2 = out->height / 2;                                                \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        const float smooth = 1.f + fabsf((y - h2) / h2) - progress * 2.f;            \
+        for (int x = 0; x < width; x++) {                                            \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+HORZCLOSE_TRANSITION(8, uint8_t, 1)
+HORZCLOSE_TRANSITION(16, uint16_t, 2)
+
+static float frand(int x, int y)
+{
+    const float r = sinf(x * 12.9898f + y * 78.233f) * 43758.545f;
+
+    return r - floorf(r);
+}
+
+#define DISSOLVE_TRANSITION(name, type, div)                                         \
+static void dissolve##name##_transition(AVFilterContext *ctx,                        \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = frand(x, y) * 2.f + progress * 2.f - 1.5f;          \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = smooth >= 0.5f ? xf0[x] : xf1[x];                           \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+DISSOLVE_TRANSITION(8, uint8_t, 1)
+DISSOLVE_TRANSITION(16, uint16_t, 2)
+
+#define PIXELIZE_TRANSITION(name, type, div)                                         \
+static void pixelize##name##_transition(AVFilterContext *ctx,                        \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int w = out->width;                                                        \
+    const int h = out->height;                                                       \
+    const float d = fminf(progress, 1.f - progress);                                 \
+    const float dist = ceilf(d * 50.f) / 50.f;                                       \
+    const float sqx = 2.f * dist * FFMIN(w, h) / 20.f;                               \
+    const float sqy = 2.f * dist * FFMIN(w, h) / 20.f;                               \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < w; x++) {                                                \
+            int sx = dist > 0.f ? FFMIN((floorf(x / sqx) + .5f) * sqx, w - 1) : x;   \
+            int sy = dist > 0.f ? FFMIN((floorf(y / sqy) + .5f) * sqy, h - 1) : y;   \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + sy * a->linesize[p]);  \
+                const type *xf1 = (const type *)(b->data[p] + sy * b->linesize[p]);  \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf0[sx], xf1[sx], progress);                            \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+PIXELIZE_TRANSITION(8, uint8_t, 1)
+PIXELIZE_TRANSITION(16, uint16_t, 2)
+
+#define DIAGTL_TRANSITION(name, type, div)                                           \
+static void diagtl##name##_transition(AVFilterContext *ctx,                          \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w = width;                                                           \
+    const float h = out->height;                                                     \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 1.f + x / w * y / h - progress * 2.f;               \
+                                                                                     \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+DIAGTL_TRANSITION(8, uint8_t, 1)
+DIAGTL_TRANSITION(16, uint16_t, 2)
+
+#define DIAGTR_TRANSITION(name, type, div)                                           \
+static void diagtr##name##_transition(AVFilterContext *ctx,                          \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w = width;                                                           \
+    const float h = out->height;                                                     \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 1.f + (w - 1 - x) / w * y / h - progress * 2.f;     \
+                                                                                     \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+DIAGTR_TRANSITION(8, uint8_t, 1)
+DIAGTR_TRANSITION(16, uint16_t, 2)
+
+#define DIAGBL_TRANSITION(name, type, div)                                           \
+static void diagbl##name##_transition(AVFilterContext *ctx,                          \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w = width;                                                           \
+    const float h = out->height;                                                     \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 1.f + x / w * (h - 1 - y) / h - progress * 2.f;     \
+                                                                                     \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+DIAGBL_TRANSITION(8, uint8_t, 1)
+DIAGBL_TRANSITION(16, uint16_t, 2)
+
+#define DIAGBR_TRANSITION(name, type, div)                                           \
+static void diagbr##name##_transition(AVFilterContext *ctx,                          \
+                            const AVFrame *a, const AVFrame *b, AVFrame *out,        \
+                            float progress,                                          \
+                            int slice_start, int slice_end, int jobnr)               \
+{                                                                                    \
+    XFadeContext *s = ctx->priv;                                                     \
+    const int width = out->width;                                                    \
+    const float w = width;                                                           \
+    const float h = out->height;                                                     \
+                                                                                     \
+    for (int y = slice_start; y < slice_end; y++) {                                  \
+        for (int x = 0; x < width; x++) {                                            \
+            const float smooth = 1.f + (w - 1 - x) / w * (h - 1 - y) / h -           \
+                                 progress * 2.f;                                     \
+                                                                                     \
+            for (int p = 0; p < s->nb_planes; p++) {                                 \
+                const type *xf0 = (const type *)(a->data[p] + y * a->linesize[p]);   \
+                const type *xf1 = (const type *)(b->data[p] + y * b->linesize[p]);   \
+                type *dst = (type *)(out->data[p] + y * out->linesize[p]);           \
+                                                                                     \
+                dst[x] = mix(xf1[x], xf0[x], smoothstep(0.f, 1.f, smooth));          \
+            }                                                                        \
+        }                                                                            \
+    }                                                                                \
+}
+
+DIAGBR_TRANSITION(8, uint8_t, 1)
+DIAGBR_TRANSITION(16, uint16_t, 2)
+
 static inline double getpix(void *priv, double x, double y, int plane, int nb)
 {
     XFadeContext *s = priv;
@@ -906,6 +1278,18 @@ static int config_output(AVFilterLink *outlink)
     case SMOOTHRIGHT:s->transitionf = s->depth <= 8 ? smoothright8_transition: smoothright16_transition;break;
     case SMOOTHUP:   s->transitionf = s->depth <= 8 ? smoothup8_transition   : smoothup16_transition;   break;
     case SMOOTHDOWN: s->transitionf = s->depth <= 8 ? smoothdown8_transition : smoothdown16_transition; break;
+    case CIRCLEOPEN: s->transitionf = s->depth <= 8 ? circleopen8_transition : circleopen16_transition; break;
+    case CIRCLECLOSE:s->transitionf = s->depth <= 8 ? circleclose8_transition: circleclose16_transition;break;
+    case VERTOPEN:   s->transitionf = s->depth <= 8 ? vertopen8_transition   : vertopen16_transition;   break;
+    case VERTCLOSE:  s->transitionf = s->depth <= 8 ? vertclose8_transition  : vertclose16_transition;  break;
+    case HORZOPEN:   s->transitionf = s->depth <= 8 ? horzopen8_transition   : horzopen16_transition;   break;
+    case HORZCLOSE:  s->transitionf = s->depth <= 8 ? horzclose8_transition  : horzclose16_transition;  break;
+    case DISSOLVE:   s->transitionf = s->depth <= 8 ? dissolve8_transition   : dissolve16_transition;   break;
+    case PIXELIZE:   s->transitionf = s->depth <= 8 ? pixelize8_transition   : pixelize16_transition;   break;
+    case DIAGTL:     s->transitionf = s->depth <= 8 ? diagtl8_transition     : diagtl16_transition;     break;
+    case DIAGTR:     s->transitionf = s->depth <= 8 ? diagtr8_transition     : diagtr16_transition;     break;
+    case DIAGBL:     s->transitionf = s->depth <= 8 ? diagbl8_transition     : diagbl16_transition;     break;
+    case DIAGBR:     s->transitionf = s->depth <= 8 ? diagbr8_transition     : diagbr16_transition;     break;
     }
 
     if (s->transition == CUSTOM) {

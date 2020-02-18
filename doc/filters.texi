@@ -2257,6 +2257,10 @@ It accepts the following values:
 Set additional parameter which controls sigmoid function.
 @end table
 
+@subsection Commands
+
+This filter supports the all above options as @ref{commands}.
+
 @section asr
 Automatic Speech Recognition
 
@@ -5857,6 +5861,44 @@ aevalsrc="0.1*sin(2*PI*(360-2.5/2)*t) | 0.1*sin(2*PI*(360+2.5/2)*t)"
 
 @end itemize
 
+@section afirsrc
+
+Generate a FIR coefficients using frequency sampling method.
+
+The resulting stream can be used with @ref{afir} filter for filtering the audio signal.
+
+The filter accepts the following options:
+
+@table @option
+@item taps, t
+Set number of filter coefficents in output audio stream.
+Default value is 1025.
+
+@item frequency, f
+Set frequency points from where magnitude and phase are set.
+This must be in non decreasing order, and first element must be 0, while last element
+must be 1. Elements are separated by white spaces.
+
+@item magnitude, m
+Set magnitude value for every frequency point set by @option{frequency}.
+Number of values must be same as number of frequency points.
+Values are separated by white spaces.
+
+@item phase, p
+Set phase value for every frequency point set by @option{frequency}.
+Number of values must be same as number of frequency points.
+Values are separated by white spaces.
+
+@item sample_rate, r
+Set sample rate, default is 44100.
+
+@item nb_samples, n
+Set number of samples per each frame. Default is 1024.
+
+@item win_func, w
+Set window function. Default is blackman.
+@end table
+
 @section anullsrc
 
 The null audio source, return unprocessed audio frames. It is mainly useful
@@ -7336,6 +7378,13 @@ ffmpeg -i background.png -i video.mp4 -filter_complex "[1:v]colorkey=0x3BBD1E:0.
 @end example
 @end itemize
 
+@subsection Commands
+This filter supports same @ref{commands} as options.
+The command accepts the same syntax of the corresponding option.
+
+If the specified expression is not valid, it is kept at its current
+value.
+
 @section colorhold
 Remove all color information for all RGB colors except for certain one.
 
@@ -7353,6 +7402,13 @@ Similarity percentage with the above color.
 Blend percentage. 0.0 makes pixels fully gray.
 Higher values result in more preserved color.
 @end table
+
+@subsection Commands
+This filter supports same @ref{commands} as options.
+The command accepts the same syntax of the corresponding option.
+
+If the specified expression is not valid, it is kept at its current
+value.
 
 @section colorlevels
 
@@ -7422,6 +7478,10 @@ Increase brightness:
 colorlevels=romin=0.5:gomin=0.5:bomin=0.5
 @end example
 @end itemize
+
+@subsection Commands
+
+This filter supports the all above options as @ref{commands}.
 
 @section colormatrix
 
@@ -11981,7 +12041,18 @@ Upload system memory frames to hardware surfaces.
 
 The device to upload to must be supplied when the filter is initialised.  If
 using ffmpeg, select the appropriate device with the @option{-filter_hw_device}
-option.
+option or with the @option{derive_device} option.  The input and output devices
+must be of different types and compatible - the exact meaning of this is
+system-dependent, but typically it means that they must refer to the same
+underlying hardware context (for example, refer to the same graphics card).
+
+The following additional parameters are accepted:
+
+@table @option
+@item derive_device @var{type}
+Rather than using the device supplied at initialisation, instead derive a new
+device of type @var{type} from the device the input frames exist on.
+@end table
 
 @anchor{hwupload_cuda}
 @section hwupload_cuda
@@ -13218,6 +13289,11 @@ Set which planes to process. Default is @code{15}, which is all available planes
 Set vertical radius size. Default value is @code{0}.
 Allowed range is integer from 0 to 127.
 If it is 0, value will be picked from horizontal @code{radius} option.
+
+@item percentile
+Set median percentile. Default value is @code{0.5}.
+Default value of @code{0.5} will pick always median values, while @code{0} will pick
+minimum values, and @code{1} maximum values.
 @end table
 
 @subsection Commands
@@ -15409,6 +15485,11 @@ Xmap and Ymap input video streams are 16bit depth, single channel.
 @item format
 Specify pixel format of output from this filter. Can be @code{color} or @code{gray}.
 Default is @code{color}.
+
+@item fill
+Specify the color of the unmapped pixels. For the syntax of this option,
+check the @ref{color syntax,,"Color" section in the ffmpeg-utils
+manual,ffmpeg-utils}. Default color is @code{black}.
 @end table
 
 @section removegrain
@@ -19929,6 +20010,18 @@ Set one of available transition effects:
 @item smoothright
 @item smoothup
 @item smoothdown
+@item circleopen
+@item circleclose
+@item vertopen
+@item vertclose
+@item horzopen
+@item horzclose
+@item dissolve
+@item pixelize
+@item diagtl
+@item diagtr
+@item diagbl
+@item diagbr
 @end table
 Default transition effect is fade.
 
@@ -20006,6 +20099,11 @@ If number of inputs is even number, than result will be mean value between two m
 
 @item planes
 Set which planes to filter. Default value is @code{15}, by which all planes are processed.
+
+@item percentile
+Set median percentile. Default value is @code{0.5}.
+Default value of @code{0.5} will pick always median values, while @code{0} will pick
+minimum values, and @code{1} maximum values.
 @end table
 
 @section xstack
@@ -21078,6 +21176,83 @@ The inputs have same memory layout for color channels , the overlay has addition
 @end example
 
 @end itemize
+
+@section pad_opencl
+
+Add paddings to the input image, and place the original input at the
+provided @var{x}, @var{y} coordinates.
+
+It accepts the following options:
+
+@table @option
+@item width, w
+@item height, h
+Specify an expression for the size of the output image with the
+paddings added. If the value for @var{width} or @var{height} is 0, the
+corresponding input size is used for the output.
+
+The @var{width} expression can reference the value set by the
+@var{height} expression, and vice versa.
+
+The default value of @var{width} and @var{height} is 0.
+
+@item x
+@item y
+Specify the offsets to place the input image at within the padded area,
+with respect to the top/left border of the output image.
+
+The @var{x} expression can reference the value set by the @var{y}
+expression, and vice versa.
+
+The default value of @var{x} and @var{y} is 0.
+
+If @var{x} or @var{y} evaluate to a negative number, they'll be changed
+so the input image is centered on the padded area.
+
+@item color
+Specify the color of the padded area. For the syntax of this option,
+check the @ref{color syntax,,"Color" section in the ffmpeg-utils
+manual,ffmpeg-utils}.
+
+@item aspect
+Pad to an aspect instead to a resolution.
+@end table
+
+The value for the @var{width}, @var{height}, @var{x}, and @var{y}
+options are expressions containing the following constants:
+
+@table @option
+@item in_w
+@item in_h
+The input video width and height.
+
+@item iw
+@item ih
+These are the same as @var{in_w} and @var{in_h}.
+
+@item out_w
+@item out_h
+The output width and height (the size of the padded area), as
+specified by the @var{width} and @var{height} expressions.
+
+@item ow
+@item oh
+These are the same as @var{out_w} and @var{out_h}.
+
+@item x
+@item y
+The x and y offsets as specified by the @var{x} and @var{y}
+expressions, or NAN if not yet specified.
+
+@item a
+same as @var{iw} / @var{ih}
+
+@item sar
+input sample aspect ratio
+
+@item dar
+input display aspect ratio, it is the same as (@var{iw} / @var{ih}) * @var{sar}
+@end table
 
 @section prewitt_opencl
 
