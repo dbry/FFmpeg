@@ -57,6 +57,11 @@
 #define MAX_HISTORY_BINS    (1 << MAX_HISTORY_BITS)
 #define MAX_BIN_BYTES       1280    // for value_lookup, per bin (2k - 512 - 256)
 
+typedef enum {
+    MODULATION_PCM,     // pulse code modulation
+    MODULATION_DSD      // pulse density modulation (aka DSD)
+} Modulation;
+
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
     int stereo, stereo_in;
@@ -100,6 +105,7 @@ typedef struct WavpackContext {
     int samples;
     int ch_offset;
 
+    Modulation modulation;
     DSDContext *dsdctx;
 } WavpackContext;
 
@@ -1017,7 +1023,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     void *samples_l = NULL, *samples_r = NULL;
     int ret;
     int got_terms   = 0, got_weights = 0, got_samples = 0,
-        got_entropy = 0, got_bs      = 0, got_float   = 0, got_hybrid = 0;
+        got_entropy = 0, got_pcm     = 0, got_float   = 0, got_hybrid = 0;
     int got_dsd = 0;
     int i, j, id, size, ssize, weights, t;
     int bpp, chan = 0, orig_bpp, sample_rate = 0, rate_x = 1, dsd_mode = 0;
@@ -1272,7 +1278,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             if ((ret = init_get_bits8(&s->gb, gb.buffer, size)) < 0)
                 return ret;
             bytestream2_skip(&gb, size);
-            got_bs       = 1;
+            got_pcm      = 1;
             break;
         case WP_ID_DSD_DATA:
             if (size < 2) {
@@ -1364,7 +1370,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             bytestream2_skip(&gb, 1);
     }
 
-    if (got_bs) {
+    if (got_pcm) {
         if (!got_terms) {
             av_log(avctx, AV_LOG_ERROR, "No block with decorrelation terms\n");
             return AVERROR_INVALIDDATA;
@@ -1399,9 +1405,15 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
     }
 
-    if (!got_bs && !got_dsd) {
+    if (!got_pcm && !got_dsd) {
         av_log(avctx, AV_LOG_ERROR, "Packed samples not found\n");
         return AVERROR_INVALIDDATA;
+    }
+
+    if ((got_pcm && wc->modulation != MODULATION_PCM) ||
+        (got_dsd && wc->modulation != MODULATION_DSD)) {
+            av_log(avctx, AV_LOG_ERROR, "Invalid PCM/DSD mix encountered\n");
+            return AVERROR_INVALIDDATA;
     }
 
     if (!wc->ch_offset) {
@@ -1431,7 +1443,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
             return ret;
 
-        if (got_bs)
+        if (got_pcm)
             ff_thread_finish_setup(avctx);
     }
 
@@ -1485,6 +1497,12 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
 static void wavpack_decode_flush(AVCodecContext *avctx)
 {
+    WavpackContext *s = avctx->priv_data;
+
+    if (!avctx->internal->is_copy) {
+        for (int i = 0; i < avctx->channels; i++)
+            memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
+    }
 }
 
 static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
@@ -1510,6 +1528,8 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
                s->samples);
         return AVERROR_INVALIDDATA;
     }
+
+    s->modulation = (frame_flags & WV_DSD_DATA) ? MODULATION_DSD : MODULATION_PCM;
 
     if (frame_flags & (WV_FLOAT_DATA | WV_DSD_DATA)) {
         avctx->sample_fmt = AV_SAMPLE_FMT_FLTP;
