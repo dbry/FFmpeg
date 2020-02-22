@@ -105,6 +105,8 @@ typedef struct WavpackContext {
     int samples;
     int ch_offset;
 
+    AVFrame *frame;
+    ThreadFrame curr_frame, prev_frame;
     Modulation modulation;
     DSDContext *dsdctx;
 } WavpackContext;
@@ -970,11 +972,28 @@ static int init_thread_copy(AVCodecContext *avctx)
 {
     WavpackContext *s = avctx->priv_data;
     s->avctx = avctx;
+
+    s->curr_frame.f = av_frame_alloc();
+    s->prev_frame.f = av_frame_alloc();
+
     return 0;
 }
 
 static int update_thread_context(AVCodecContext *dst, const AVCodecContext *src)
 {
+    WavpackContext *fsrc = src->priv_data;
+    WavpackContext *fdst = dst->priv_data;
+    int ret;
+
+    if (dst == src)
+        return 0;
+
+    ff_thread_release_buffer(dst, &fdst->curr_frame);
+    if (fsrc->curr_frame.f->data[0]) {
+        if ((ret = ff_thread_ref_frame(&fdst->curr_frame, &fsrc->curr_frame)) < 0)
+            return ret;
+    }
+
     return 0;
 }
 #endif
@@ -987,9 +1006,16 @@ static av_cold int wavpack_decode_init(AVCodecContext *avctx)
 
     s->fdec_num = 0;
 
-    // the DSD to PCM context is shared (and used serially) between all decoding threads
+    avctx->internal->allocate_progress = 1;
 
+    s->curr_frame.f = av_frame_alloc();
+    s->prev_frame.f = av_frame_alloc();
+
+    // the DSD to PCM context is shared (and used serially) between all decoding threads
     s->dsdctx = av_calloc(avctx->channels, sizeof (DSDContext));
+
+    if (!s->curr_frame.f || !s->prev_frame.f || !s->dsdctx)
+        return AVERROR(ENOMEM);
 
     for (int i = 0; i < avctx->channels; i++)
         memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
@@ -1007,6 +1033,12 @@ static av_cold int wavpack_decode_end(AVCodecContext *avctx)
         av_freep(&s->fdec[i]);
     s->fdec_num = 0;
 
+    ff_thread_release_buffer(avctx, &s->curr_frame);
+    av_frame_free(&s->curr_frame.f);
+
+    ff_thread_release_buffer(avctx, &s->prev_frame);
+    av_frame_free(&s->prev_frame.f);
+
     if (!avctx->internal->is_copy)
         av_freep(&s->dsdctx);
 
@@ -1014,10 +1046,9 @@ static av_cold int wavpack_decode_end(AVCodecContext *avctx)
 }
 
 static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
-                                AVFrame *frame, const uint8_t *buf, int buf_size)
+                                const uint8_t *buf, int buf_size)
 {
     WavpackContext *wc = avctx->priv_data;
-    ThreadFrame tframe = { .f = frame };
     WavpackFrameContext *s;
     GetByteContext gb;
     void *samples_l = NULL, *samples_r = NULL;
@@ -1438,13 +1469,16 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                                                 AV_CH_LAYOUT_MONO;
         }
 
+        ff_thread_release_buffer(avctx, &wc->prev_frame);
+        FFSWAP(ThreadFrame, wc->curr_frame, wc->prev_frame);
+
         /* get output buffer */
-        frame->nb_samples = s->samples;
-        if ((ret = ff_thread_get_buffer(avctx, &tframe, 0)) < 0)
+        wc->curr_frame.f->nb_samples = s->samples;
+        if ((ret = ff_thread_get_buffer(avctx, &wc->curr_frame, AV_GET_BUFFER_FLAG_REF)) < 0)
             return ret;
 
-        if (got_pcm)
-            ff_thread_finish_setup(avctx);
+        wc->frame = wc->curr_frame.f;
+        ff_thread_finish_setup(avctx);
     }
 
     if (wc->ch_offset + s->stereo >= avctx->channels) {
@@ -1452,9 +1486,9 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         return ((avctx->err_recognition & AV_EF_EXPLODE) || !wc->ch_offset) ? AVERROR_INVALIDDATA : 0;
     }
 
-    samples_l = frame->extended_data[wc->ch_offset];
+    samples_l = wc->frame->extended_data[wc->ch_offset];
     if (s->stereo)
-        samples_r = frame->extended_data[wc->ch_offset + 1];
+        samples_r = wc->frame->extended_data[wc->ch_offset + 1];
 
     if (s->stereo_in) {
         if (got_dsd) {
@@ -1485,13 +1519,6 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
 
     wc->ch_offset += 1 + s->stereo;
 
-    if (!ret && got_dsd && wc->ch_offset == avctx->channels) {
-        // ff_thread_await_prev_finished(avctx);
-
-        for (i = 0; i < avctx->channels; ++i)
-            ff_dsd2pcm_translate (&wc->dsdctx [i], s->samples, 0, (uint8_t *) frame->extended_data[i], 4, (float *) frame->extended_data[i], 1);
-    }
-
     return ret;
 }
 
@@ -1511,12 +1538,12 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
     WavpackContext *s  = avctx->priv_data;
     const uint8_t *buf = avpkt->data;
     int buf_size       = avpkt->size;
-    AVFrame *frame     = data;
     int frame_size, ret, frame_flags;
 
     if (avpkt->size <= WV_HEADER_SIZE)
         return AVERROR_INVALIDDATA;
 
+    s->frame     = NULL;
     s->block     = 0;
     s->ch_offset = 0;
 
@@ -1548,14 +1575,11 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
             av_log(avctx, AV_LOG_ERROR,
                    "Block %d has invalid size (size %d vs. %d bytes left)\n",
                    s->block, frame_size, buf_size);
-            wavpack_decode_flush(avctx);
-            return AVERROR_INVALIDDATA;
+            ret = AVERROR_INVALIDDATA;
+            goto error;
         }
-        if ((ret = wavpack_decode_block(avctx, s->block,
-                                        frame, buf, frame_size)) < 0) {
-            wavpack_decode_flush(avctx);
-            return ret;
-        }
+        if ((ret = wavpack_decode_block(avctx, s->block, buf, frame_size)) < 0)
+            goto error;
         s->block++;
         buf      += frame_size;
         buf_size -= frame_size;
@@ -1563,12 +1587,36 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
 
     if (s->ch_offset != avctx->channels) {
         av_log(avctx, AV_LOG_ERROR, "Not enough channels coded in a packet.\n");
-        return AVERROR_INVALIDDATA;
+        ret = AVERROR_INVALIDDATA;
+        goto error;
     }
+
+    ff_thread_await_progress(&s->prev_frame, INT_MAX, 0);
+    ff_thread_release_buffer(avctx, &s->prev_frame);
+
+    if (s->modulation == MODULATION_DSD)
+        for (int i = 0; i < avctx->channels; ++i)
+            ff_dsd2pcm_translate (&s->dsdctx [i], s->samples, 0,
+                (uint8_t *) s->frame->extended_data[i], 4,
+                (float *) s->frame->extended_data[i], 1);
+
+    ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
+
+    if ((ret = av_frame_ref(data, s->frame)) < 0)
+        return ret;
 
     *got_frame_ptr = 1;
 
     return avpkt->size;
+
+error:
+    if (s->frame) {
+        ff_thread_await_progress(&s->prev_frame, INT_MAX, 0);
+        ff_thread_release_buffer(avctx, &s->prev_frame);
+        ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
+    }
+
+    return ret;
 }
 
 AVCodec ff_wavpack_decoder = {
