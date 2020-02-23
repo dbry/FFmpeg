@@ -1519,6 +1519,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
             ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
         if (ret < 0)
             return ret;
+
         if (s->stereo)
             memcpy(samples_r, samples_l, bpp * s->samples);
     }
