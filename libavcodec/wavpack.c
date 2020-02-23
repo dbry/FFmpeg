@@ -1532,6 +1532,18 @@ static void wavpack_decode_flush(AVCodecContext *avctx)
     }
 }
 
+static int dsd_channel(AVCodecContext *avctx, void *frmptr, int jobnr, int threadnr)
+{
+    WavpackContext *s  = avctx->priv_data;
+    AVFrame *frame = frmptr;
+
+    ff_dsd2pcm_translate (&s->dsdctx [jobnr], s->samples, 0,
+        (uint8_t *) frame->extended_data[jobnr], 4,
+        (float *) frame->extended_data[jobnr], 1);
+
+    return 0;
+}
+
 static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
                                 int *got_frame_ptr, AVPacket *avpkt)
 {
@@ -1595,10 +1607,7 @@ static int wavpack_decode_frame(AVCodecContext *avctx, void *data,
     ff_thread_release_buffer(avctx, &s->prev_frame);
 
     if (s->modulation == MODULATION_DSD)
-        for (int i = 0; i < avctx->channels; ++i)
-            ff_dsd2pcm_translate (&s->dsdctx [i], s->samples, 0,
-                (uint8_t *) s->frame->extended_data[i], 4,
-                (float *) s->frame->extended_data[i], 1);
+        avctx->execute2(avctx, dsd_channel, s->frame, NULL, avctx->channels);
 
     ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
 
@@ -1631,5 +1640,6 @@ AVCodec ff_wavpack_decoder = {
     .flush          = wavpack_decode_flush,
     .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
     .update_thread_context = ONLY_IF_THREADS_ENABLED(update_thread_context),
-    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
+                      AV_CODEC_CAP_SLICE_THREADS
 };
