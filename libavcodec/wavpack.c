@@ -64,6 +64,7 @@ typedef enum {
 
 typedef struct WavpackFrameContext {
     AVCodecContext *avctx;
+    int frame_flags;
     int stereo, stereo_in;
     int joint;
     uint32_t CRC;
@@ -1058,7 +1059,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     int got_dsd = 0;
     int i, j, id, size, ssize, weights, t;
     int bpp, chan = 0, orig_bpp, sample_rate = 0, rate_x = 1, dsd_mode = 0;
-    int frame_flags, multiblock;
+    int multiblock;
     uint64_t chmask = 0;
 
     if (block_no >= wc->fdec_num && wv_alloc_frame_context(wc) < 0) {
@@ -1087,17 +1088,17 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
                "a sequence: %d and %d\n", wc->samples, s->samples);
         return AVERROR_INVALIDDATA;
     }
-    frame_flags    = bytestream2_get_le32(&gb);
+    s->frame_flags = bytestream2_get_le32(&gb);
     bpp            = av_get_bytes_per_sample(avctx->sample_fmt);
-    orig_bpp       = ((frame_flags & 0x03) + 1) << 3;
-    multiblock     = (frame_flags & WV_SINGLE_BLOCK) != WV_SINGLE_BLOCK;
+    orig_bpp       = ((s->frame_flags & 0x03) + 1) << 3;
+    multiblock     = (s->frame_flags & WV_SINGLE_BLOCK) != WV_SINGLE_BLOCK;
 
-    s->stereo         = !(frame_flags & WV_MONO);
-    s->stereo_in      =  (frame_flags & WV_FALSE_STEREO) ? 0 : s->stereo;
-    s->joint          =   frame_flags & WV_JOINT_STEREO;
-    s->hybrid         =   frame_flags & WV_HYBRID_MODE;
-    s->hybrid_bitrate =   frame_flags & WV_HYBRID_BITRATE;
-    s->post_shift     = bpp * 8 - orig_bpp + ((frame_flags >> 13) & 0x1f);
+    s->stereo         = !(s->frame_flags & WV_MONO);
+    s->stereo_in      =  (s->frame_flags & WV_FALSE_STEREO) ? 0 : s->stereo;
+    s->joint          =   s->frame_flags & WV_JOINT_STEREO;
+    s->hybrid         =   s->frame_flags & WV_HYBRID_MODE;
+    s->hybrid_bitrate =   s->frame_flags & WV_HYBRID_BITRATE;
+    s->post_shift     = bpp * 8 - orig_bpp + ((s->frame_flags >> 13) & 0x1f);
     if (s->post_shift < 0 || s->post_shift > 31) {
         return AVERROR_INVALIDDATA;
     }
@@ -1448,7 +1449,7 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     }
 
     if (!wc->ch_offset) {
-        int sr = (frame_flags >> 23) & 0xf;
+        int sr = (s->frame_flags >> 23) & 0xf;
         if (sr == 0xf) {
             if (!sample_rate) {
                 av_log(avctx, AV_LOG_ERROR, "Custom sample rate missing.\n");
