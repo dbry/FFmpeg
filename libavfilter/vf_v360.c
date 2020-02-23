@@ -1561,8 +1561,8 @@ static int equirect_to_xyz(const V360Context *s,
                            int i, int j, int width, int height,
                            float *vec)
 {
-    const float phi   = ((2.f * i) / width  - 1.f) * M_PI;
-    const float theta = ((2.f * j) / height - 1.f) * M_PI_2;
+    const float phi   = ((2.f * i + 0.5f) / width  - 1.f) * M_PI;
+    const float theta = ((2.f * j + 0.5f) / height - 1.f) * M_PI_2;
 
     const float sin_phi   = sinf(phi);
     const float cos_phi   = cosf(phi);
@@ -2401,7 +2401,7 @@ static int fisheye_to_xyz(const V360Context *s,
                           float *vec)
 {
     const float uf = s->flat_range[0] * ((2.f * i) / width  - 1.f);
-    const float vf = s->flat_range[1] * ((2.f * j) / height - 1.f);
+    const float vf = s->flat_range[1] * ((2.f * j + 1.f) / height - 1.f);
 
     const float phi   = -atan2f(vf, uf);
     const float theta = -M_PI_2 * (1.f - hypotf(uf, vf));
@@ -2777,7 +2777,7 @@ static int dfisheye_to_xyz(const V360Context *s,
     const float m = i >= ew ? -1.f : 1.f;
 
     const float uf = ((2.f * ei) / ew - 1.f) * scale;
-    const float vf = ((2.f *  j) / eh - 1.f) * scale;
+    const float vf = ((2.f * j + 1.f) / eh - 1.f) * scale;
 
     const float h     = hypotf(uf, vf);
     const float lh    = h > 0.f ? h : 1.f;
