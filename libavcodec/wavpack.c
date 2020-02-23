@@ -1491,6 +1491,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
     if (s->stereo)
         samples_r = wc->frame->extended_data[wc->ch_offset + 1];
 
+    wc->ch_offset += 1 + s->stereo;
+
     if (s->stereo_in) {
         if (got_dsd) {
             if (dsd_mode == 3)
@@ -1502,6 +1504,8 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
         else
             ret = wv_unpack_stereo(s, &s->gb, samples_l, samples_r, avctx->sample_fmt);
+        if (ret < 0)
+            return ret;
     } else {
         if (got_dsd) {
             if (dsd_mode == 3)
@@ -1513,14 +1517,13 @@ static int wavpack_decode_block(AVCodecContext *avctx, int block_no,
         }
         else
             ret = wv_unpack_mono(s, &s->gb, samples_l, avctx->sample_fmt);
-
+        if (ret < 0)
+            return ret;
         if (s->stereo)
             memcpy(samples_r, samples_l, bpp * s->samples);
     }
 
-    wc->ch_offset += 1 + s->stereo;
-
-    return ret;
+    return 0;
 }
 
 static void wavpack_decode_flush(AVCodecContext *avctx)
