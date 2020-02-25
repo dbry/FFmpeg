@@ -434,9 +434,10 @@ typedef struct {
     unsigned int byte;
 } DSDfilters;
 
-static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
+static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_left, uint8_t *dst_right)
 {
     uint32_t checksum = 0xFFFFFFFF;
+    uint8_t *dst_l = dst_left, *dst_r = dst_right;
     int total_samples = s->samples, stereo = dst_r ? 1 : 0;
     DSDfilters filters[2], *sp = filters;
     int rate_i, rate_s;
@@ -470,11 +471,6 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     value = bytestream2_get_be32(&s->gbyte);
     high = 0xffffffff;
     low = 0x0;
-
-    memset(dst_l, 0x69, total_samples * 4);
-
-    if (stereo)
-        memset(dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
         int bitcount = 8;
@@ -564,14 +560,22 @@ static int wv_unpack_dsd_high(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         }
     }
 
-    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, checksum, 0))
-        return AVERROR_INVALIDDATA;
+    if (wv_check_crc(s, checksum, 0)) {
+        if (s->avctx->err_recognition & AV_EF_CRCCHECK)
+            return AVERROR_INVALIDDATA;
+
+        memset(dst_left, 0x69, s->samples * 4);
+
+        if (dst_r)
+            memset(dst_right, 0x69, s->samples * 4);
+    }
 
     return 0;
 }
 
-static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
+static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_left, uint8_t *dst_right)
 {
+    uint8_t *dst_l = dst_left, *dst_r = dst_right;
     uint8_t history_bits, max_probability;
     int total_summed_probabilities  = 0;
     int total_samples               = s->samples;
@@ -651,12 +655,8 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
     low = 0; high = 0xffffffff;
     value = bytestream2_get_be32(&s->gbyte);
 
-    memset(dst_l, 0x69, total_samples * 4);
-
-    if (dst_r) {
-        memset(dst_r, 0x69, total_samples * 4);
+    if (dst_r)
         total_samples *= 2;
-    }
 
     while (total_samples--) {
         unsigned int mult, index, code;
@@ -721,24 +721,27 @@ static int wv_unpack_dsd_fast(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         }
     }
 
-    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, checksum, 0))
-        return AVERROR_INVALIDDATA;
+    if (wv_check_crc(s, checksum, 0)) {
+        if (s->avctx->err_recognition & AV_EF_CRCCHECK)
+            return AVERROR_INVALIDDATA;
+
+        memset(dst_left, 0x69, s->samples * 4);
+
+        if (dst_r)
+            memset(dst_right, 0x69, s->samples * 4);
+    }
 
     return 0;
 }
 
-static int wv_unpack_dsd_copy(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *dst_r)
+static int wv_unpack_dsd_copy(WavpackFrameContext *s, uint8_t *dst_left, uint8_t *dst_right)
 {
+    uint8_t *dst_l = dst_left, *dst_r = dst_right;
     int total_samples           = s->samples;
     uint32_t checksum           = 0xFFFFFFFF;
 
     if (bytestream2_get_bytes_left(&s->gbyte) != total_samples * (dst_r ? 2 : 1))
         return AVERROR_INVALIDDATA;
-
-    memset(dst_l, 0x69, total_samples * 4);
-
-    if (dst_r)
-        memset(dst_r, 0x69, total_samples * 4);
 
     while (total_samples--) {
         checksum += (checksum << 1) + (*dst_l = bytestream2_get_byte(&s->gbyte));
@@ -750,8 +753,15 @@ static int wv_unpack_dsd_copy(WavpackFrameContext *s, uint8_t *dst_l, uint8_t *d
         }
     }
 
-    if ((s->avctx->err_recognition & AV_EF_CRCCHECK) && wv_check_crc(s, checksum, 0))
-        return AVERROR_INVALIDDATA;
+    if (wv_check_crc(s, checksum, 0)) {
+        if (s->avctx->err_recognition & AV_EF_CRCCHECK)
+            return AVERROR_INVALIDDATA;
+
+        memset(dst_left, 0x69, s->samples * 4);
+
+        if (dst_r)
+            memset(dst_right, 0x69, s->samples * 4);
+    }
 
     return 0;
 }
