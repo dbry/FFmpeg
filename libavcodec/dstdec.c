@@ -297,6 +297,18 @@ static void decode_flush(AVCodecContext *avctx)
     }
 }
 
+static int dsd_channel(AVCodecContext *avctx, void *frmptr, int jobnr, int threadnr)
+{
+    DSTContext *s  = avctx->priv_data;
+    AVFrame *frame = frmptr;
+
+    ff_dsd2pcm_translate(&s->dsdctx[jobnr], frame->nb_samples, 0,
+        frame->data[0] + jobnr * 4, avctx->channels * 4,
+        (float *) frame->data[0] + jobnr, avctx->channels);
+
+    return 0;
+}
+
 static int decode_frame(AVCodecContext *avctx, void *data,
                         int *got_frame_ptr, AVPacket *avpkt)
 {
@@ -311,7 +323,6 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     ArithCoder *ac = &s->ac;
     AVFrame *frame;
     uint8_t *dsd;
-    float *pcm;
     int ret;
 
     if (avpkt->size <= 1)
@@ -325,7 +336,6 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     if ((ret = ff_thread_get_buffer(avctx, &s->curr_frame, AV_GET_BUFFER_FLAG_REF)) < 0)
         return ret;
     dsd = frame->data[0];
-    pcm = (float *)frame->data[0];
 
     ff_thread_finish_setup(avctx);
 
@@ -450,17 +460,12 @@ dsd:
     // we must wait for the previous frame to be complete before doing the DSD2PCM
     ff_thread_await_progress(&s->prev_frame, INT_MAX, 0);
     ff_thread_release_buffer(avctx, &s->prev_frame);
-
-    for (i = 0; i < channels; i++) {
-        ff_dsd2pcm_translate(&s->dsdctx[i], frame->nb_samples, 0,
-                             frame->data[0] + i * 4,
-                             channels * 4, pcm + i, channels);
-    }
+    avctx->execute2(avctx, dsd_channel, frame, NULL, avctx->channels);
 
     // report that the DSD2PCM is done for this frame
     ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
 
-    if ((ret = av_frame_ref(data, s->curr_frame.f)) < 0)
+    if ((ret = av_frame_ref(data, frame)) < 0)
         return ret;
 
     *got_frame_ptr = 1;
@@ -486,7 +491,8 @@ AVCodec ff_dst_decoder = {
     .flush          = decode_flush,
     .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
     .update_thread_context = ONLY_IF_THREADS_ENABLED(update_thread_context),
-    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
+                      AV_CODEC_CAP_SLICE_THREADS,
     .sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLT,
                                                       AV_SAMPLE_FMT_NONE },
 };
