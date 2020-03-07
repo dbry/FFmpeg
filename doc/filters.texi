@@ -6608,7 +6608,8 @@ The threshold below which a pixel value is considered black; it defaults to
 
 @end table
 
-@section blend, tblend
+@anchor{blend}
+@section blend
 
 Blend two video frames into each other.
 
@@ -6994,6 +6995,21 @@ Only deinterlace frames marked as interlaced.
 @end table
 
 The default value is @code{all}.
+@end table
+
+@section cas
+
+Apply Contrast Adaptive Sharpen filter to video stream.
+
+The filter accepts the following options:
+
+@table @option
+@item strength
+Set the sharpening strength. Default value is 0.
+
+@item planes
+Set planes to filter. Default value is to filter all
+planes except alpha plane.
 @end table
 
 @section chromahold
@@ -12226,6 +12242,8 @@ this value filter algorithm for connecting components is activated.
 By default value is 0.
 @end table
 
+The @code{hysteresis} filter also supports the @ref{framesync} options.
+
 @section idet
 
 Detect video interlacing type.
@@ -13077,6 +13095,8 @@ set fourth pixel component expression, corresponds to the alpha component
 set output bit depth, only available for @code{lut2} filter. By default is 0,
 which means bit depth is automatically picked from first input format.
 @end table
+
+The @code{lut2} filter also supports the @ref{framesync} options.
 
 Each of them specifies the expression to use for computing the lookup table for
 the corresponding pixel component values.
@@ -17802,6 +17822,11 @@ the position in the file of the input frame, NAN if unknown
 @section swapuv
 Swap U & V plane.
 
+@section tblend
+Blend successive video frames.
+
+See @ref{blend}
+
 @section telecine
 
 Apply telecine process to the video.
@@ -18911,7 +18936,8 @@ Default value is @b{@samp{0}}.
 
 @item barrel
 @item fb
-Facebook's 360 format.
+@item barrelsplit
+Facebook's 360 formats.
 
 @item sg
 Stereographic format.
@@ -19005,6 +19031,13 @@ Set perspective parameter.
 
 @item tetrahedron
 Tetrahedron projection.
+
+@item tsp
+Truncated square pyramid projection.
+
+@item he
+@item hequirect
+Half equirectangular projection.
 @end table
 
 @item interp
@@ -19114,6 +19147,10 @@ Convert transposed and horizontally flipped Equi-Angular Cubemap in side-by-side
 v360=eac:equirect:in_stereo=sbs:in_trans=1:ih_flip=1:out_stereo=tb
 @end example
 @end itemize
+
+@subsection Commands
+
+This filter supports subset of above options as @ref{commands}.
 
 @section vaguedenoiser
 
@@ -21303,6 +21340,8 @@ Number of inputs to the filter.  Defaults to 1.
 Size of output frames.  Defaults to the same as the first input.
 
 @end table
+
+The @code{program_opencl} filter also supports the @ref{framesync} options.
 
 The program source file must contain a kernel function with the given name,
 which will be run once for each plane of the output.  Each run on a plane
@@ -23633,6 +23672,29 @@ The command is sent when the current frame timestamp leaves the
 specified interval. In other words, the command is sent when the
 previous frame timestamp was in the given interval, and the
 current is not.
+
+@item expr
+The command @var{ARG} is interpreted as expression and result of
+expression is passed as @var{ARG}.
+
+The expression is evaluated through the eval API and can contain the following
+constants:
+
+@table @option
+@item POS
+Original position in the file of the frame, or undefined if undefined
+for the current frame.
+
+@item PTS
+The presentation timestamp in input.
+
+@item N
+The count of the input frame for video or audio, starting from 0.
+
+@item T
+The time in seconds of the current frame.
+@end table
+
 @end table
 
 If @var{FLAGS} is not specified, a default value of @code{[enter]} is
