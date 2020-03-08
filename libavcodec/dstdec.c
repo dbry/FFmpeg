@@ -30,7 +30,6 @@
 #include "internal.h"
 #include "get_bits.h"
 #include "avcodec.h"
-#include "thread.h"
 #include "golomb.h"
 #include "mathops.h"
 #include "dsd.h"
@@ -74,8 +73,7 @@ typedef struct DSTContext {
     Table fsets, probs;
     DECLARE_ALIGNED(16, uint8_t, status)[DST_MAX_CHANNELS][16];
     DECLARE_ALIGNED(16, int16_t, filter)[DST_MAX_ELEMENTS][16][256];
-    ThreadFrame curr_frame, prev_frame;
-    DSDContext *dsdctx;
+    DSDContext dsdctx[DST_MAX_CHANNELS];
 } DSTContext;
 
 static av_cold int decode_init(AVCodecContext *avctx)
@@ -88,68 +86,12 @@ static av_cold int decode_init(AVCodecContext *avctx)
         return AVERROR_PATCHWELCOME;
     }
 
-    avctx->internal->allocate_progress = 1;
     avctx->sample_fmt = AV_SAMPLE_FMT_FLT;
-
-    s->curr_frame.f = av_frame_alloc();
-    s->prev_frame.f = av_frame_alloc();
-    if (!s->curr_frame.f || !s->prev_frame.f)
-        return AVERROR(ENOMEM);
-
-    // the DSD to PCM context is shared (and used serially) between all decoding threads
-
-    s->dsdctx = av_calloc(DST_MAX_CHANNELS, sizeof (DSDContext));
 
     for (i = 0; i < avctx->channels; i++)
         memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
 
     ff_init_dsd_data();
-
-    return 0;
-}
-
-#if HAVE_THREADS
-static int init_thread_copy(AVCodecContext *avctx)
-{
-    DSTContext *s = avctx->priv_data;
-
-    s->curr_frame.f = av_frame_alloc();
-    s->prev_frame.f = av_frame_alloc();
-
-    return 0;
-}
-
-static int update_thread_context(AVCodecContext *dst, const AVCodecContext *src)
-{
-    DSTContext *fsrc = src->priv_data;
-    DSTContext *fdst = dst->priv_data;
-    int ret;
-
-    if (dst == src)
-        return 0;
-
-    ff_thread_release_buffer(dst, &fdst->curr_frame);
-    if (fsrc->curr_frame.f->data[0]) {
-        if ((ret = ff_thread_ref_frame(&fdst->curr_frame, &fsrc->curr_frame)) < 0)
-            return ret;
-    }
-
-    return 0;
-}
-#endif
-
-static av_cold int decode_end(AVCodecContext *avctx)
-{
-    DSTContext *s = avctx->priv_data;
-
-    ff_thread_release_buffer(avctx, &s->curr_frame);
-    av_frame_free(&s->curr_frame.f);
-
-    ff_thread_release_buffer(avctx, &s->prev_frame);
-    av_frame_free(&s->prev_frame.f);
-
-    if (!avctx->internal->is_copy)
-        av_freep(&s->dsdctx);
 
     return 0;
 }
@@ -287,28 +229,6 @@ static void build_filter(int16_t table[DST_MAX_ELEMENTS][16][256], const Table *
     }
 }
 
-static void decode_flush(AVCodecContext *avctx)
-{
-    DSTContext *s = avctx->priv_data;
-
-    if (!avctx->internal->is_copy) {
-        for (int i = 0; i < avctx->channels; i++)
-            memset(s->dsdctx[i].buf, 0x69, sizeof(s->dsdctx[i].buf));
-    }
-}
-
-static int dsd_channel(AVCodecContext *avctx, void *frmptr, int jobnr, int threadnr)
-{
-    DSTContext *s  = avctx->priv_data;
-    AVFrame *frame = frmptr;
-
-    ff_dsd2pcm_translate(&s->dsdctx[jobnr], frame->nb_samples, 0,
-        frame->data[0] + jobnr * 4, avctx->channels * 4,
-        (float *) frame->data[0] + jobnr, avctx->channels);
-
-    return 0;
-}
-
 static int decode_frame(AVCodecContext *avctx, void *data,
                         int *got_frame_ptr, AVPacket *avpkt)
 {
@@ -321,33 +241,27 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     DSTContext *s = avctx->priv_data;
     GetBitContext *gb = &s->gb;
     ArithCoder *ac = &s->ac;
-    AVFrame *frame;
+    AVFrame *frame = data;
     uint8_t *dsd;
+    float *pcm;
     int ret;
 
     if (avpkt->size <= 1)
         return AVERROR_INVALIDDATA;
 
-    ff_thread_release_buffer(avctx, &s->prev_frame);
-    FFSWAP(ThreadFrame, s->curr_frame, s->prev_frame);
-    frame = s->curr_frame.f;
-
     frame->nb_samples = samples_per_frame / 8;
-    if ((ret = ff_thread_get_buffer(avctx, &s->curr_frame, AV_GET_BUFFER_FLAG_REF)) < 0)
+    if ((ret = ff_get_buffer(avctx, frame, 0)) < 0)
         return ret;
     dsd = frame->data[0];
-
-    ff_thread_finish_setup(avctx);
+    pcm = (float *)frame->data[0];
 
     if ((ret = init_get_bits8(gb, avpkt->data, avpkt->size)) < 0)
-        goto error;
+        return ret;
 
     if (!get_bits1(gb)) {
         skip_bits1(gb);
-        if (get_bits(gb, 6)) {
-            ret = AVERROR_INVALIDDATA;
-            goto error;
-        }
+        if (get_bits(gb, 6))
+            return AVERROR_INVALIDDATA;
         memcpy(frame->data[0], avpkt->data + 1, FFMIN(avpkt->size - 1, frame->nb_samples * channels));
         goto dsd;
     }
@@ -356,20 +270,17 @@ static int decode_frame(AVCodecContext *avctx, void *data,
 
     if (!get_bits1(gb)) {
         avpriv_request_sample(avctx, "Not Same Segmentation");
-        ret = AVERROR_PATCHWELCOME;
-        goto error;
+        return AVERROR_PATCHWELCOME;
     }
 
     if (!get_bits1(gb)) {
         avpriv_request_sample(avctx, "Not Same Segmentation For All Channels");
-        ret = AVERROR_PATCHWELCOME;
-        goto error;
+        return AVERROR_PATCHWELCOME;
     }
 
     if (!get_bits1(gb)) {
         avpriv_request_sample(avctx, "Not End Of Channel Segmentation");
-        ret = AVERROR_PATCHWELCOME;
-        goto error;
+        return AVERROR_PATCHWELCOME;
     }
 
     /* Mapping (10.7, 10.8, 10.9) */
@@ -377,7 +288,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     same_map = get_bits1(gb);
 
     if ((ret = read_map(gb, &s->fsets, map_ch_to_felem, channels)) < 0)
-        goto error;
+        return ret;
 
     if (same_map) {
         s->probs.elements = s->fsets.elements;
@@ -385,7 +296,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     } else {
         avpriv_request_sample(avctx, "Not Same Mapping");
         if ((ret = read_map(gb, &s->probs, map_ch_to_pelem, channels)) < 0)
-            goto error;
+            return ret;
     }
 
     /* Half Probability (10.10) */
@@ -397,20 +308,18 @@ static int decode_frame(AVCodecContext *avctx, void *data,
 
     ret = read_table(gb, &s->fsets, fsets_code_pred_coeff, 7, 9, 1, 0);
     if (ret < 0)
-        goto error;
+        return ret;
 
     /* Probability Tables (10.13) */
 
     ret = read_table(gb, &s->probs, probs_code_pred_coeff, 6, 7, 0, 1);
     if (ret < 0)
-        goto error;
+        return ret;
 
     /* Arithmetic Coded Data (10.11) */
 
-    if (get_bits1(gb)) {
-        ret = AVERROR_INVALIDDATA;
-        goto error;
-    }
+    if (get_bits1(gb))
+        return AVERROR_INVALIDDATA;
     ac_init(ac, gb);
 
     build_filter(s->filter, &s->fsets);
@@ -442,10 +351,8 @@ static int decode_frame(AVCodecContext *avctx, void *data,
                 prob = 128;
             }
 
-            if (ac->overread > 16) {
-                ret = AVERROR_INVALIDDATA;
-                goto error;
-            }
+            if (ac->overread > 16)
+                return AVERROR_INVALIDDATA;
 
             ac_get(ac, gb, prob, &residual);
             v = ((predict >> 15) ^ residual) & 1;
@@ -457,26 +364,15 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     }
 
 dsd:
-    // we must wait for the previous frame to be complete before doing the DSD2PCM
-    ff_thread_await_progress(&s->prev_frame, INT_MAX, 0);
-    ff_thread_release_buffer(avctx, &s->prev_frame);
-    avctx->execute2(avctx, dsd_channel, frame, NULL, avctx->channels);
-
-    // report that the DSD2PCM is done for this frame
-    ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
-
-    if ((ret = av_frame_ref(data, frame)) < 0)
-        return ret;
+    for (i = 0; i < channels; i++) {
+        ff_dsd2pcm_translate(&s->dsdctx[i], frame->nb_samples, 0,
+                             frame->data[0] + i * 4,
+                             channels * 4, pcm + i, channels);
+    }
 
     *got_frame_ptr = 1;
 
     return avpkt->size;
-
-error:
-    ff_thread_await_progress(&s->prev_frame, INT_MAX, 0);
-    ff_thread_release_buffer(avctx, &s->prev_frame);
-    ff_thread_report_progress(&s->curr_frame, INT_MAX, 0);
-    return ret;
 }
 
 AVCodec ff_dst_decoder = {
@@ -486,13 +382,8 @@ AVCodec ff_dst_decoder = {
     .id             = AV_CODEC_ID_DST,
     .priv_data_size = sizeof(DSTContext),
     .init           = decode_init,
-    .close          = decode_end,
     .decode         = decode_frame,
-    .flush          = decode_flush,
-    .init_thread_copy = ONLY_IF_THREADS_ENABLED(init_thread_copy),
-    .update_thread_context = ONLY_IF_THREADS_ENABLED(update_thread_context),
-    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
-                      AV_CODEC_CAP_SLICE_THREADS,
+    .capabilities   = AV_CODEC_CAP_DR1,
     .sample_fmts    = (const enum AVSampleFormat[]) { AV_SAMPLE_FMT_FLT,
                                                       AV_SAMPLE_FMT_NONE },
 };
